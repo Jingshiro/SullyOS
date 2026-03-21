@@ -1,6 +1,24 @@
 let hasInstalledIOSStandaloneWorkaround = false;
 let stableStandaloneHeight = 0;
 
+const readSafeAreaInset = (edge: 'top' | 'right' | 'bottom' | 'left'): number => {
+    if (typeof document === 'undefined') return 0;
+
+    const probe = document.createElement('div');
+    probe.style.position = 'fixed';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    probe.style.opacity = '0';
+    probe.style.setProperty(`padding-${edge}`, `env(safe-area-inset-${edge})`);
+    document.body.appendChild(probe);
+
+    const computed = window.getComputedStyle(probe);
+    const inset = parseFloat(computed.getPropertyValue(`padding-${edge}`)) || 0;
+
+    document.body.removeChild(probe);
+    return Math.round(inset);
+};
+
 export const isIOSDevice = (): boolean => {
     if (typeof navigator === 'undefined') return false;
     const ua = navigator.userAgent || '';
@@ -26,6 +44,7 @@ const setViewportVars = () => {
     const innerHeight = Math.round(window.innerHeight);
     const viewportHeight = Math.round(window.visualViewport?.height || innerHeight);
     const viewportOffsetTop = Math.round(window.visualViewport?.offsetTop || 0);
+    const bottomSafeInset = shouldStabilizeHeight ? readSafeAreaInset('bottom') : 0;
     const obscuredHeight = Math.max(0, innerHeight - viewportHeight - viewportOffsetTop);
     const keyboardInset = obscuredHeight > 120 ? obscuredHeight : 0;
     const nextViewportHeight = Math.max(innerHeight, viewportHeight + viewportOffsetTop);
@@ -41,10 +60,14 @@ const setViewportVars = () => {
     const appHeight = shouldStabilizeHeight
         ? (stableStandaloneHeight || nextViewportHeight)
         : nextViewportHeight;
+    const fullAppHeight = shouldStabilizeHeight
+        ? appHeight + bottomSafeInset
+        : appHeight;
 
-    document.documentElement.style.setProperty('--app-height', `${appHeight}px`);
+    document.documentElement.style.setProperty('--app-height', `${fullAppHeight}px`);
     document.documentElement.style.setProperty('--visual-viewport-height', `${viewportHeight}px`);
     document.documentElement.style.setProperty('--keyboard-inset', `${keyboardInset}px`);
+    document.documentElement.style.setProperty('--standalone-safe-area-bottom', `${bottomSafeInset}px`);
 };
 
 export const installIOSStandaloneWorkaround = () => {

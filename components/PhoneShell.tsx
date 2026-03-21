@@ -315,6 +315,24 @@ const PhoneShell: React.FC = () => {
       window.scrollTo(0, 0);
   }, [activeApp]);
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    const wallpaper = theme.wallpaper;
+    const backgroundValue = !wallpaper
+      ? '#0f1115'
+      : (wallpaper.startsWith('http') || wallpaper.startsWith('data:') || wallpaper.startsWith('blob:'))
+        ? `url(${wallpaper})`
+        : wallpaper;
+
+    [document.documentElement, document.body].forEach((element) => {
+      element.style.background = backgroundValue;
+      element.style.backgroundPosition = 'center';
+      element.style.backgroundSize = 'cover';
+      element.style.backgroundRepeat = 'no-repeat';
+    });
+  }, [theme.wallpaper]);
+
   if (!isDataLoaded) {
     return <div className="w-full h-full bg-black flex items-center justify-center"><div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin"></div></div>;
   }
