@@ -24,7 +24,7 @@ const PROXY_MAP: Record<string, string> = {
  * Return the actual URL to fetch for a given proxy path.
  */
 export function resolveMinimaxUrl(proxyPath: string): string {
-  if (isNative() && PROXY_MAP[proxyPath]) {
+  if (PROXY_MAP[proxyPath] && isNative()) {
     return PROXY_MAP[proxyPath];
   }
   return proxyPath;
@@ -44,6 +44,11 @@ export async function minimaxFetch(
 
   if (!isNative()) {
     const res = await fetch(url, init);
+    // Static deployments (e.g. GitHub Pages) don't support POST /api/* proxy.
+    // If proxy endpoint is unavailable, retry against MiniMax upstream directly.
+    if ((res.status === 404 || res.status === 405) && PROXY_MAP[proxyPath]) {
+      return fetch(PROXY_MAP[proxyPath], init);
+    }
     return res;
   }
 
