@@ -239,6 +239,9 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
                   </button>
                 ))}
               </div>
+              <div className="text-[11px] text-slate-400 mt-2 pl-1">
+                2.0 标准版目前只支持：一次 / 每天 / 每周。30 分钟、1 小时、2 小时这类间隔暂时不支持。
+              </div>
             </div>
 
             {mode === 'fixed' ? (

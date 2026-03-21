@@ -4,6 +4,7 @@ import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, To
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ChatPrompts } from '../utils/chatPrompts';
+import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -1108,9 +1109,46 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               aiContent = aiContent.replace(/^[\w一-龥]+:\s*/, '');
               aiContent = aiContent.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n').trim();
 
+              aiContent = ChatParser.sanitize(aiContent);
+
               if (aiContent) {
-                  await DB.saveMessage({ charId, role: 'assistant', type: 'text', content: aiContent });
-                  const preview = aiContent.replace(/\s+/g, ' ').trim().slice(0, 120) || `${char.name} sent a proactive message`;
+                  const responseParts = ChatParser.splitResponse(aiContent);
+                  const savedPreviewChunks: string[] = [];
+                  const baseTimestamp = Date.now();
+                  let offset = 0;
+
+                  for (const part of responseParts) {
+                      if (part.type === 'emoji') {
+                          await DB.saveMessage({
+                              charId,
+                              role: 'assistant',
+                              type: 'emoji',
+                              content: part.content,
+                              timestamp: baseTimestamp + offset,
+                          });
+                          offset += 1;
+                          continue;
+                      }
+
+                      const textChunks = ChatParser.chunkText(part.content)
+                          .map(chunk => ChatParser.sanitize(chunk))
+                          .filter(chunk => ChatParser.hasDisplayContent(chunk));
+
+                      for (const chunk of textChunks) {
+                          await DB.saveMessage({
+                              charId,
+                              role: 'assistant',
+                              type: 'text',
+                              content: chunk,
+                              timestamp: baseTimestamp + offset,
+                          });
+                          savedPreviewChunks.push(chunk);
+                          offset += 1;
+                      }
+                  }
+
+                  const previewSource = savedPreviewChunks.join(' ').trim();
+                  const preview = previewSource.replace(/\s+/g, ' ').trim().slice(0, 120) || `${char.name} sent a proactive message`;
 
                   // 6. Notify OS for unread badge + toast
                   window.dispatchEvent(new CustomEvent('proactive-message-sent', {

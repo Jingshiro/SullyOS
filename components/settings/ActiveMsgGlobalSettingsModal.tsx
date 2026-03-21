@@ -75,7 +75,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
 
   const handleInitTenant = async () => {
     if (!config?.databaseUrl.trim()) {
-      addToast('先把 Neon 数据库连接串贴进去。', 'error');
+      addToast('先把 Neon 的数据库连接串贴进来。', 'error');
       return;
     }
 
@@ -182,7 +182,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             </span>
           </div>
           <p className="text-xs leading-relaxed text-slate-500">
-            这个是第二步。只有你真的想让角色在后台主动推送消息时，才需要点。
+            这是第二步。只有你真的想让角色在后台主动推送消息时，才需要点。
           </p>
           {pushStatus?.detail ? (
             <p className="text-xs leading-relaxed text-amber-600">{pushStatus.detail}</p>
@@ -197,10 +197,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         </div>
 
         <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 text-xs leading-relaxed text-amber-700 space-y-2">
-          <div className="font-bold text-amber-800">简单说明</div>
-          <p>这个功能会把主动消息相关的数据放进你自己的 Neon 数据库里。</p>
-          <p>如果你完全信任自己的数据库，就可以用；如果你不想让数据库里出现这些内容，就不要开。</p>
-          <p>项目不会额外偷偷建一个中心服务器，还是走你自己的库。</p>
+          <div className="font-bold text-amber-800">风险说明</div>
+          <p>开了 2.0 以后，主动消息内容、提示词、相关配置，都会进入你填写的 Neon 数据库。</p>
+          <p>数据库管理员有机会看到这些内容。除此之外，按这套信任模型，项目维护者也就是糯米鸡，逻辑上同样属于有权限碰到这些数据的人。</p>
+          <p>如果你不接受这一点，就不要开 2.0，也不要把自己的 API Key、敏感提示词、私密内容放进去。</p>
+          <p>项目不会额外偷偷接一个中心服务器；它走的还是你自己的库。但只要数据进库，就默认数据库管理员和项目维护者是你需要信任的人。</p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
