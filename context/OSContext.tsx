@@ -10,6 +10,16 @@ import { normalizeCharacterImpression } from '../utils/impression';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 
+const normalizeProactiveAiContent = (raw: string): string => {
+  let cleaned = raw;
+  cleaned = cleaned.replace(/\[(?:(?:你|User|用户|System)\s*)?发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
+  cleaned = cleaned.replace(
+    /(^|\n)\s*(?:(?:你|User|用户|System)\s*)?发送了表情包[:：]\s*([^\n]+?)(?=\s*(?:\n|$))/g,
+    (_match, lineStart: string, emojiName: string) => `${lineStart}[[SEND_EMOJI: ${emojiName.trim()}]]`
+  );
+  return cleaned;
+};
+
 
 type JSZipLike = {
   folder: (name: string) => { file: (name: string, data: string, options?: { base64?: boolean }) => void } | null;
@@ -1108,6 +1118,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               aiContent = aiContent.replace(/^[\w一-龥]+:\s*/, '');
               aiContent = aiContent.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n').trim();
 
+              aiContent = normalizeProactiveAiContent(aiContent);
               aiContent = ChatParser.sanitize(aiContent);
 
               if (aiContent) {
@@ -1118,13 +1129,26 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
                   for (const part of responseParts) {
                       if (part.type === 'emoji') {
-                          await DB.saveMessage({
-                              charId,
-                              role: 'assistant',
-                              type: 'emoji',
-                              content: part.content,
-                              timestamp: baseTimestamp + offset,
-                          });
+                          const foundEmoji = emojis.find(e => e.name === part.content);
+                          if (foundEmoji?.url) {
+                              await DB.saveMessage({
+                                  charId,
+                                  role: 'assistant',
+                                  type: 'emoji',
+                                  content: foundEmoji.url,
+                                  timestamp: baseTimestamp + offset,
+                              });
+                          } else {
+                              const fallbackText = `发送了表情包：${part.content}`;
+                              await DB.saveMessage({
+                                  charId,
+                                  role: 'assistant',
+                                  type: 'text',
+                                  content: fallbackText,
+                                  timestamp: baseTimestamp + offset,
+                              });
+                              savedPreviewChunks.push(fallbackText);
+                          }
                           offset += 1;
                           continue;
                       }

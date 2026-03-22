@@ -176,6 +176,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
     const isPixelHeader = headerStyle === 'pixel';
     const useCenteredLayout = headerAlign === 'center' || headerStyle === 'telegram' || headerStyle === 'minimal';
     const avatarRadiusClass = avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
+    const floatingPanelOffsetClass = !useCenteredLayout && buffs.length > 0 ? 'mt-9' : 'mt-1';
 
     const headerToneClass =
         headerStyle === 'gradient'
@@ -226,7 +227,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
     const renderBuffRow = (centered: boolean) => {
         if (buffs.length === 0) return null;
         return (
-            <div className={`mt-1 relative w-full min-w-0 max-w-full ${centered ? 'flex justify-center' : ''}`}>
+            <div className={`absolute top-full z-[35] mt-1 w-full min-w-0 max-w-full ${centered ? 'left-1/2 -translate-x-1/2 flex justify-center' : 'left-0 right-0'} `}>
                 <div
                     ref={buffPreviewRef}
                     className={`flex w-full min-w-0 max-w-full items-center gap-1 overflow-x-auto whitespace-nowrap pr-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${centered ? 'justify-center' : ''}`}
@@ -294,7 +295,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
     ) : null;
 
     const renderCenteredInfo = () => (
-        <div className="flex w-full min-w-0 max-w-full flex-col items-center text-center">
+        <div className="relative flex w-full min-w-0 max-w-full flex-col items-center text-center">
             <img src={activeCharacter.avatar} className={`w-10 h-10 object-cover shadow-sm ${avatarRadiusClass}`} alt="avatar" />
             <div className={`mt-1 font-bold ${primaryTextClass}`}>{activeCharacter.name}</div>
             <div className="mt-1 flex items-center justify-center gap-2 flex-wrap">
@@ -307,7 +308,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
     const renderStandardInfo = () => (
         <>
             <img src={activeCharacter.avatar} className={`w-10 h-10 object-cover shadow-sm ${avatarRadiusClass}`} alt="avatar" />
-            <div className="flex-1 min-w-0 flex flex-col items-start text-left">
+            <div className="relative flex-1 min-w-0 flex flex-col items-start text-left">
                 <div className={`font-bold ${primaryTextClass}`}>{activeCharacter.name}</div>
                 <div className="flex items-center gap-2 flex-wrap">
                     {onlineStatusNode}
@@ -371,7 +372,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
             )}
 
             {isBuffListExpanded && hiddenBuffCount > 0 && (
-                <div ref={buffPanelRef} className="absolute top-full left-4 right-4 mt-1 bg-white rounded-xl shadow-lg border border-slate-200 p-3 z-40">
+                <div ref={buffPanelRef} className={`absolute top-full left-4 right-4 ${floatingPanelOffsetClass} bg-white rounded-xl shadow-lg border border-slate-200 p-3 z-40`}>
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">全部状态</div>
                     <div className="max-h-36 overflow-y-auto pr-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                         <div className="flex flex-wrap gap-1.5">
@@ -398,7 +399,7 @@ const ChatHeaderShell: React.FC<ChatHeaderShellProps> = ({
             )}
 
             {openBuff && (
-                <div ref={cardRef} className="absolute top-full left-4 right-4 mt-1 bg-white rounded-xl shadow-lg border border-slate-200 p-3 z-50">
+                <div ref={cardRef} className={`absolute top-full left-4 right-4 ${floatingPanelOffsetClass} bg-white rounded-xl shadow-lg border border-slate-200 p-3 z-50`}>
                     <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2">
                             <span className="text-sm font-bold" style={{ color: openBuff.color || '#db2777' }}>
