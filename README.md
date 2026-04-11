@@ -190,6 +190,12 @@ A: 就是我也不知道什么意思。系统正在哈我。
 对接了 [xiaohongshu-skills](https://github.com/autoclaw-cc/xiaohongshu-skills)，让角色能真·发小红书。  
 本地部署教程看这里：[真实小红书本地部署指南](https://www.kdocs.cn/l/chctbSTPfm4L)
 
+**优秀二改推荐**
+CSY二改，来着CSY吱吱吱老师，几乎算半个nmj官方！
+
+**一直以来负责制作教程的**
+优秀的乔霖，勤勤恳恳供养新人
+
 > 没有这些人，SullyOS 会少很多功能。数据库暂时停止咕咕叫以表敬意。
 
 ## 开源协议
