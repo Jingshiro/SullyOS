@@ -754,11 +754,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         let finalChars = dbChars;
 
-        if (!finalChars.some(c => c.id === sullyV2.id)) {
+        // ONLY auto-create if there are ZERO characters in the DB
+        if (finalChars.length === 0) {
             await DB.saveCharacter(sullyV2);
-            finalChars = [...finalChars, sullyV2];
-        } else {
-            // REPAIR LOGIC
+            finalChars = [sullyV2];
+        } else if (finalChars.some(c => c.id === sullyV2.id)) {
+            // REPAIR LOGIC: Only run if Sully exists in the DB
             const existingSully = finalChars.find(c => c.id === sullyV2.id);
             if (existingSully) {
                  const currentSprites = existingSully.sprites || {};
