@@ -6,7 +6,7 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { safeResponseJson } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
-import WebDAVSettingsModal from '../components/os/WebDAVSettingsModal';
+import S3SettingsModal from '../components/os/S3SettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
 import { NotionManager, FeishuManager } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
@@ -19,7 +19,7 @@ const Settings: React.FC = () => {
       apiPresets, addApiPreset, removeApiPreset,
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
-      webdavConfig
+      s3Config
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
@@ -37,7 +37,7 @@ const Settings: React.FC = () => {
   const [showPresetModal, setShowPresetModal] = useState(false);
   const [showRealtimeModal, setShowRealtimeModal] = useState(false);
   const [showActiveMsgModal, setShowActiveMsgModal] = useState(false);
-  const [showWebDAVModal, setShowWebDAVModal] = useState(false);
+  const [showS3Modal, setShowS3Modal] = useState(false);
 
   // Real-time感知配置
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
@@ -463,9 +463,9 @@ const Settings: React.FC = () => {
                     <div className="p-2 bg-indigo-100 rounded-xl text-indigo-600">
                         <CloudArrowUp size={18} weight="bold" />
                     </div>
-                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">WebDAV 云端同步</h2>
+                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">S3 / R2 云端同步</h2>
                 </div>
-                <button onClick={() => setShowWebDAVModal(true)} className="text-[10px] bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
+                <button onClick={() => setShowS3Modal(true)} className="text-[10px] bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
                     同步配置
                 </button>
             </div>
@@ -473,14 +473,14 @@ const Settings: React.FC = () => {
             <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
                 <div className="flex flex-col">
                     <span className="text-xs font-bold text-slate-600">
-                        {webdavConfig.enabled ? '已开启云端同步' : '未开启云端同步'}
+                        {s3Config.endpoint && s3Config.bucketName ? '已配置云端同步' : '未配置云端同步'}
                     </span>
                     <span className="text-[10px] text-slate-400 truncate max-w-[180px]">
-                        {webdavConfig.url || '尚未配置服务器地址'}
+                        {s3Config.bucketName || '尚未配置 Bucket'}
                     </span>
                 </div>
                 <button 
-                    onClick={() => setShowWebDAVModal(true)}
+                    onClick={() => setShowS3Modal(true)}
                     className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-indigo-500 shadow-sm active:scale-95 transition-all"
                 >
                     去同步
@@ -488,7 +488,7 @@ const Settings: React.FC = () => {
             </div>
             
             <p className="text-[10px] text-slate-400 mt-3 leading-relaxed pl-1">
-                支持坚果云、Nextcloud 等 WebDAV 服务。一键备份所有数据到云端，更换设备或清理缓存后可快速恢复。
+                支持 AWS S3、Cloudflare R2 等兼容服务。一键备份所有数据到云端 Bucket，更换设备或清理缓存后可快速恢复。
             </p>
         </section>
 
@@ -935,9 +935,9 @@ const Settings: React.FC = () => {
           </div>
       </Modal>
 
-      <WebDAVSettingsModal
-          isOpen={showWebDAVModal}
-          onClose={() => setShowWebDAVModal(false)}
+      <S3SettingsModal
+          isOpen={showS3Modal}
+          onClose={() => setShowS3Modal(false)}
       />
 
     </div>

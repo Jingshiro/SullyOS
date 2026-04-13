@@ -1,6 +1,6 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, WebDAVConfig } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, S3Config } from '../types';
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ChatPrompts } from '../utils/chatPrompts';
@@ -9,7 +9,7 @@ import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
-import { WebDAVClient } from '../utils/webdavClient';
+import { S3BackupClient } from '../utils/s3Client';
 
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
@@ -188,11 +188,11 @@ interface OSContextType {
   systemLogs: SystemLog[];
   clearLogs: () => void;
 
-  // WebDAV
-  webdavConfig: WebDAVConfig;
-  updateWebDAVConfig: (updates: Partial<WebDAVConfig>) => void;
-  syncToWebDAV: () => Promise<void>;
-  restoreFromWebDAV: () => Promise<void>;
+  // S3
+  s3Config: S3Config;
+  updateS3Config: (updates: Partial<S3Config>) => void;
+  syncToS3: () => Promise<void>;
+  restoreFromS3: () => Promise<void>;
 
   // Navigation Logic
   registerBackHandler: (handler: () => boolean) => () => void; // Returns unregister function
@@ -455,13 +455,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // Sys Operation Status
   const [sysOperation, setSysOperation] = useState<{ status: 'idle' | 'processing', message: string, progress: number }>({ status: 'idle', message: '', progress: 0 });
 
-  // WebDAV Config
-  const [webdavConfig, setWebdavConfig] = useState<WebDAVConfig>({
+  // S3 Config
+  const [s3Config, setS3Config] = useState<S3Config>({
       enabled: false,
-      url: '',
-      username: '',
-      password: '',
-      path: '/SullyOS'
+      endpoint: '',
+      accessKeyId: '',
+      secretAccessKey: '',
+      bucketName: '',
+      region: 'auto',
+      path: 'backups/'
   });
 
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -528,11 +530,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       interceptorsInitialized.current = true;
 
       // 1. Monkey Patch Fetch
-      const originalFetch = window.fetch;
+      const originalFetch = window.fetch.bind(window);
       const patchedFetch = async (...args: [RequestInfo | URL, RequestInit?]) => {
           const [resource, config] = args;
           
-          const urlStr = String(resource);
+          let urlStr = '';
+          if (typeof resource === 'string') {
+              urlStr = resource;
+          } else if (resource instanceof URL) {
+              urlStr = resource.toString();
+          } else if (resource instanceof Request) {
+              urlStr = resource.url;
+          }
           
           try {
               const response = await originalFetch(...args);
@@ -659,13 +668,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             }
         }
 
-        // 加载 WebDAV 配置
-        const savedWebDAV = localStorage.getItem('os_webdav_config');
-        if (savedWebDAV) {
+        // 加载 S3/R2 配置
+        const savedS3 = localStorage.getItem('os_s3_config');
+        if (savedS3) {
             try {
-                setWebdavConfig(prev => ({ ...prev, ...JSON.parse(savedWebDAV) }));
+                setS3Config(prev => ({ ...prev, ...JSON.parse(savedS3) }));
             } catch (e) {
-                console.error('Failed to load WebDAV config', e);
+                console.error('Failed to load S3 config', e);
             }
         }
 
@@ -2042,49 +2051,44 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const resetSystem = async () => { try { await DB.deleteDB(); localStorage.clear(); window.location.reload(); } catch (e) { console.error(e); addToast('重置失败，请手动清除浏览器数据', 'error'); } };
 
-  const updateWebDAVConfig = (updates: Partial<WebDAVConfig>) => {
-      const next = { ...webdavConfig, ...updates };
-      setWebdavConfig(next);
-      localStorage.setItem('os_webdav_config', JSON.stringify(next));
+  const updateS3Config = (updates: Partial<S3Config>) => {
+      const next = { ...s3Config, ...updates };
+      setS3Config(next);
+      localStorage.setItem('os_s3_config', JSON.stringify(next));
   };
 
-  const syncToWebDAV = async () => {
-      if (!webdavConfig.url || !webdavConfig.username || !webdavConfig.password) {
-          throw new Error('WebDAV 配置不完整');
+  const syncToS3 = async () => {
+      if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
+          throw new Error('S3 / R2 配置不完整');
       }
       
       try {
           setSysOperation({ status: 'processing', message: '正在准备备份数据...', progress: 10 });
           const blob = await exportSystem('full');
           
-          setSysOperation({ status: 'processing', message: '正在连接云端服务器...', progress: 80 });
-          
-          // Ensure directory exists
-          await WebDAVClient.createDirectory(webdavConfig, '/');
+          setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 80 });
 
           const fileName = `Sully_Backup_Latest.zip`;
-          const success = await WebDAVClient.putFile(webdavConfig, fileName, blob);
-          
-          if (!success) throw new Error('上传失败');
+          await S3BackupClient.uploadBackup(s3Config, fileName, blob);
           
           setSysOperation({ status: 'idle', message: '', progress: 100 });
-          addToast('云端同步成功', 'success');
+          addToast('云端备份成功', 'success');
       } catch (e: any) {
           setSysOperation({ status: 'idle', message: '', progress: 0 });
-          addToast(`同步失败: ${e.message}`, 'error');
+          addToast(`备份失败: ${e.message}`, 'error');
           throw e;
       }
   };
 
-  const restoreFromWebDAV = async () => {
-      if (!webdavConfig.url || !webdavConfig.username || !webdavConfig.password) {
-          throw new Error('WebDAV 配置不完整');
+  const restoreFromS3 = async () => {
+      if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
+          throw new Error('S3 / R2 配置不完整');
       }
 
       try {
           setSysOperation({ status: 'processing', message: '正在从云端下载备份...', progress: 20 });
           const fileName = `Sully_Backup_Latest.zip`;
-          const blob = await WebDAVClient.getFile(webdavConfig, fileName);
+          const blob = await S3BackupClient.downloadBackup(s3Config, fileName);
           
           setSysOperation({ status: 'processing', message: '下载完成，正在解析数据...', progress: 50 });
           
@@ -2201,10 +2205,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     sysOperation,
     systemLogs,
     clearLogs,
-    webdavConfig,
-    updateWebDAVConfig,
-    syncToWebDAV,
-    restoreFromWebDAV,
+    s3Config,
+    updateS3Config,
+    syncToS3,
+    restoreFromS3,
     registerBackHandler,
     handleBack,
     suspendedCall,

@@ -1056,13 +1056,14 @@ export interface Emoji {
     categoryId?: string; 
 }
 
-export interface WebDAVConfig {
+export interface S3Config {
   enabled: boolean;
-  url: string;
-  username: string;
-  password: string;
-  path: string;     // e.g. /SullyOS
-  autoBackup?: boolean;
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucketName: string;
+  region: string;
+  path: string; // Optional folder path e.g., backups/
 }
 
 export interface FullBackupData {
