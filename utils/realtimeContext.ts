@@ -30,8 +30,10 @@ export interface SearchResult {
 export interface RealtimeConfig {
     // 天气配置
     weatherEnabled: boolean;
-    weatherApiKey: string;  // OpenWeatherMap API Key
-    weatherCity: string;    // 城市名 (如 "Beijing" 或 "Shanghai")
+    weatherProvider: 'openweathermap' | 'qweather';
+    weatherApiKey: string;  // API Key
+    weatherApiHost?: string; // QWeather 专属域名
+    weatherCity: string;    // 城市名 (OpenWeatherMap 为英文名，QWeather 可为经纬度、城市名或 LocationID)
 
     // 新闻配置
     newsEnabled: boolean;
@@ -67,7 +69,9 @@ export interface RealtimeConfig {
 // 默认配置
 export const defaultRealtimeConfig: RealtimeConfig = {
     weatherEnabled: false,
+    weatherProvider: 'openweathermap',
     weatherApiKey: '',
+    weatherApiHost: '',
     weatherCity: 'Beijing',
     newsEnabled: false,
     newsApiKey: '',
@@ -113,7 +117,7 @@ export const RealtimeContextManager = {
         }
 
         const now = Date.now();
-        const cacheMs = config.cacheMinutes * 60 * 1000;
+        const cacheMs = (config.cacheMinutes || 30) * 60 * 1000;
 
         // 检查缓存
         if (weatherCache.data && (now - weatherCache.timestamp) < cacheMs) {
@@ -121,27 +125,80 @@ export const RealtimeContextManager = {
         }
 
         try {
-            const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(config.weatherCity)}&appid=${config.weatherApiKey}&units=metric&lang=zh_cn`;
+            let weather: WeatherData | null = null;
 
-            const response = await fetch(url);
-            if (!response.ok) {
-                console.error('Weather API error:', response.status);
-                return null;
+            if (config.weatherProvider === 'qweather') {
+                // 和风天气 (QWeather)
+                let locationId = config.weatherCity;
+                const isIdOrCoord = /^\d+$/.test(locationId) || /^-?\d+\.?\d*,-?\d+\.?\d*$/.test(locationId);
+                const host = (config.weatherApiHost || 'devapi.qweather.com').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+                
+                // 如果不是 ID 或经纬度，尝试通过 GeoAPI 转换
+                if (!isIdOrCoord) {
+                    try {
+                        // 强制使用专属域名的路径格式 /geo/v2/city/lookup
+                        const geoUrl = `https://${host}/geo/v2/city/lookup?location=${encodeURIComponent(config.weatherCity)}&key=${config.weatherApiKey}`;
+                        const geoRes = await fetch(geoUrl);
+                        if (geoRes.ok) {
+                            const geoData = await safeResponseJson(geoRes);
+                            if (geoData.code === '200' && geoData.location?.[0]) {
+                                locationId = geoData.location[0].id;
+                            }
+                        }
+                    } catch (geoErr) {
+                        console.error('QWeather GeoAPI error:', geoErr);
+                    }
+                }
+
+                // 构建实时天气 URL (专属域名下通常也是这个路径，或者 /v7/weather/now)
+                const url = `https://${host}/v7/weather/now?location=${encodeURIComponent(locationId)}&key=${config.weatherApiKey}&lang=zh`;
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    console.error('QWeather API error:', response.status);
+                    return null;
+                }
+
+                const data = await safeResponseJson(response);
+                if (data.code !== '200') {
+                    console.error('QWeather API error code:', data.code);
+                    return null;
+                }
+
+                weather = {
+                    temp: Math.round(parseFloat(data.now.temp)),
+                    feelsLike: Math.round(parseFloat(data.now.feelsLike)),
+                    humidity: parseInt(data.now.humidity),
+                    description: data.now.text,
+                    icon: data.now.icon,
+                    city: config.weatherCity // QWeather /now 接口不返回城市名，暂时使用配置中的城市名
+                };
+            } else {
+                // OpenWeatherMap (默认)
+                const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(config.weatherCity)}&appid=${config.weatherApiKey}&units=metric&lang=zh_cn`;
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    console.error('OpenWeatherMap API error:', response.status);
+                    return null;
+                }
+
+                const data = await safeResponseJson(response);
+
+                weather = {
+                    temp: Math.round(data.main.temp),
+                    feelsLike: Math.round(data.main.feels_like),
+                    humidity: data.main.humidity,
+                    description: data.weather[0]?.description || '未知',
+                    icon: data.weather[0]?.icon || '01d',
+                    city: data.name
+                };
             }
 
-            const data = await safeResponseJson(response);
-
-            const weather: WeatherData = {
-                temp: Math.round(data.main.temp),
-                feelsLike: Math.round(data.main.feels_like),
-                humidity: data.main.humidity,
-                description: data.weather[0]?.description || '未知',
-                icon: data.weather[0]?.icon || '01d',
-                city: data.name
-            };
-
-            // 更新缓存
-            weatherCache = { data: weather, timestamp: now };
+            if (weather) {
+                // 更新缓存
+                weatherCache = { data: weather, timestamp: now };
+            }
 
             return weather;
         } catch (e) {

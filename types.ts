@@ -211,8 +211,10 @@ export interface CharacterBuff {
 export interface RealtimeConfig {
   // 天气配置
   weatherEnabled: boolean;
-  weatherApiKey: string;  // OpenWeatherMap API Key
-  weatherCity: string;    // 城市名
+  weatherProvider: 'openweathermap' | 'qweather';
+  weatherApiKey: string;  // API Key (OpenWeatherMap or QWeather)
+  weatherApiHost?: string; // QWeather 专属域名 (可选，默认使用公共域名)
+  weatherCity: string;    // 城市名 (OpenWeatherMap 为英文名，QWeather 可为经纬度、城市名或 LocationID)
 
   // 新闻配置
   newsEnabled: boolean;
@@ -1052,6 +1054,15 @@ export interface Emoji {
     name: string;
     url: string;
     categoryId?: string; 
+}
+
+export interface WebDAVConfig {
+  enabled: boolean;
+  url: string;
+  username: string;
+  password: string;
+  path: string;     // e.g. /SullyOS
+  autoBackup?: boolean;
 }
 
 export interface FullBackupData {

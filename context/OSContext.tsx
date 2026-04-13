@@ -1,6 +1,6 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, WebDAVConfig } from '../types';
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ChatPrompts } from '../utils/chatPrompts';
@@ -9,6 +9,7 @@ import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
+import { WebDAVClient } from '../utils/webdavClient';
 
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
@@ -75,9 +76,12 @@ const loadJSZip = async (): Promise<JSZipCtorLike> => {
 // 默认实时配置
 const defaultRealtimeConfig: RealtimeConfig = {
   weatherEnabled: false,
+  weatherProvider: 'openweathermap',
   weatherApiKey: '',
+  weatherApiHost: '',
   weatherCity: 'Beijing',
   newsEnabled: false,
+
   newsApiKey: '',
   notionEnabled: false,
   notionApiKey: '',
@@ -183,6 +187,12 @@ interface OSContextType {
   // Logs
   systemLogs: SystemLog[];
   clearLogs: () => void;
+
+  // WebDAV
+  webdavConfig: WebDAVConfig;
+  updateWebDAVConfig: (updates: Partial<WebDAVConfig>) => void;
+  syncToWebDAV: () => Promise<void>;
+  restoreFromWebDAV: () => Promise<void>;
 
   // Navigation Logic
   registerBackHandler: (handler: () => boolean) => () => void; // Returns unregister function
@@ -445,6 +455,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // Sys Operation Status
   const [sysOperation, setSysOperation] = useState<{ status: 'idle' | 'processing', message: string, progress: number }>({ status: 'idle', message: '', progress: 0 });
 
+  // WebDAV Config
+  const [webdavConfig, setWebdavConfig] = useState<WebDAVConfig>({
+      enabled: false,
+      url: '',
+      username: '',
+      password: '',
+      path: '/SullyOS'
+  });
+
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interceptorsInitialized = useRef(false);
   
@@ -637,6 +656,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 setRealtimeConfig({ ...defaultRealtimeConfig, ...JSON.parse(savedRealtimeConfig) });
             } catch (e) {
                 console.error('Failed to load realtime config', e);
+            }
+        }
+
+        // 加载 WebDAV 配置
+        const savedWebDAV = localStorage.getItem('os_webdav_config');
+        if (savedWebDAV) {
+            try {
+                setWebdavConfig(prev => ({ ...prev, ...JSON.parse(savedWebDAV) }));
+            } catch (e) {
+                console.error('Failed to load WebDAV config', e);
             }
         }
 
@@ -2011,6 +2040,65 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
 
   const resetSystem = async () => { try { await DB.deleteDB(); localStorage.clear(); window.location.reload(); } catch (e) { console.error(e); addToast('重置失败，请手动清除浏览器数据', 'error'); } };
+
+  const updateWebDAVConfig = (updates: Partial<WebDAVConfig>) => {
+      const next = { ...webdavConfig, ...updates };
+      setWebdavConfig(next);
+      localStorage.setItem('os_webdav_config', JSON.stringify(next));
+  };
+
+  const syncToWebDAV = async () => {
+      if (!webdavConfig.url || !webdavConfig.username || !webdavConfig.password) {
+          throw new Error('WebDAV 配置不完整');
+      }
+      
+      try {
+          setSysOperation({ status: 'processing', message: '正在准备备份数据...', progress: 10 });
+          const blob = await exportSystem('full');
+          
+          setSysOperation({ status: 'processing', message: '正在连接云端服务器...', progress: 80 });
+          
+          // Ensure directory exists
+          await WebDAVClient.createDirectory(webdavConfig, '/');
+
+          const fileName = `Sully_Backup_Latest.zip`;
+          const success = await WebDAVClient.putFile(webdavConfig, fileName, blob);
+          
+          if (!success) throw new Error('上传失败');
+          
+          setSysOperation({ status: 'idle', message: '', progress: 100 });
+          addToast('云端同步成功', 'success');
+      } catch (e: any) {
+          setSysOperation({ status: 'idle', message: '', progress: 0 });
+          addToast(`同步失败: ${e.message}`, 'error');
+          throw e;
+      }
+  };
+
+  const restoreFromWebDAV = async () => {
+      if (!webdavConfig.url || !webdavConfig.username || !webdavConfig.password) {
+          throw new Error('WebDAV 配置不完整');
+      }
+
+      try {
+          setSysOperation({ status: 'processing', message: '正在从云端下载备份...', progress: 20 });
+          const fileName = `Sully_Backup_Latest.zip`;
+          const blob = await WebDAVClient.getFile(webdavConfig, fileName);
+          
+          setSysOperation({ status: 'processing', message: '下载完成，正在解析数据...', progress: 50 });
+          
+          // Convert Blob to File-like for importSystem
+          const file = new File([blob], fileName, { type: 'application/zip' });
+          await importSystem(file);
+          
+          addToast('云端恢复成功', 'success');
+      } catch (e: any) {
+          setSysOperation({ status: 'idle', message: '', progress: 0 });
+          addToast(`恢复失败: ${e.message}`, 'error');
+          throw e;
+      }
+  };
+
   const openApp = (appId: AppID) => setActiveApp(appId);
   const closeApp = () => setActiveApp(AppID.Launcher);
   const unlock = () => setIsLocked(false);
@@ -2112,6 +2200,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     sysOperation,
     systemLogs,
     clearLogs,
+    webdavConfig,
+    updateWebDAVConfig,
+    syncToWebDAV,
+    restoreFromWebDAV,
     registerBackHandler,
     handleBack,
     suspendedCall,
