@@ -1074,7 +1074,7 @@ export interface FullBackupData {
     apiPresets?: ApiPreset[];
     availableModels?: string[];
     realtimeConfig?: RealtimeConfig;  // 实时感知配置（天气/新闻/Notion）
-    customIcons?: Record<string, string>;
+    s3Config?: S3Config; // S3云端同步鉴权信息
     customIcons?: Record<string, string>;
     appearancePresets?: AppearancePreset[];
     characters?: CharacterProfile[];

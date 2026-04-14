@@ -1687,7 +1687,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               apiConfig: (mode === 'text_only' || mode === 'full') ? apiConfig : undefined,
               apiPresets: (mode === 'text_only' || mode === 'full') ? apiPresets : undefined,
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
-              realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
+              realtimeConfig: realtimeConfig, // Always include real-time keys
+              s3Config: s3Config, // Always include S3 auth info
               theme: theme, // Include theme in all modes (text/media)
               customIcons: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
                   ? { ...customIcons }
@@ -1954,6 +1955,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.availableModels) saveModels(data.availableModels);
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
+          if (data.s3Config) updateS3Config(data.s3Config); // 恢复云端同步鉴权配置
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
               const existingAssets = await DB.getAllAssets();
