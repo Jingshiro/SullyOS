@@ -191,8 +191,8 @@ interface OSContextType {
   // S3
   s3Config: S3Config;
   updateS3Config: (updates: Partial<S3Config>) => void;
-  syncToS3: () => Promise<void>;
-  restoreFromS3: () => Promise<void>;
+  syncToS3: (customFileName?: string) => Promise<void>;
+  restoreFromS3: (customFileName?: string) => Promise<void>;
 
   // Navigation Logic
   registerBackHandler: (handler: () => boolean) => () => void; // Returns unregister function
@@ -2057,7 +2057,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       localStorage.setItem('os_s3_config', JSON.stringify(next));
   };
 
-  const syncToS3 = async () => {
+  const syncToS3 = async (customFileName?: string) => {
       if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
           throw new Error('S3 / R2 配置不完整');
       }
@@ -2068,7 +2068,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           
           setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 80 });
 
-          const fileName = `Sully_Backup_Latest.zip`;
+          const fileName = customFileName || `Sully_Backup_Latest.zip`;
           await S3BackupClient.uploadBackup(s3Config, fileName, blob);
           
           setSysOperation({ status: 'idle', message: '', progress: 100 });
@@ -2080,20 +2080,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
   };
 
-  const restoreFromS3 = async () => {
+  const restoreFromS3 = async (customFileName?: string) => {
       if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
           throw new Error('S3 / R2 配置不完整');
       }
 
       try {
           setSysOperation({ status: 'processing', message: '正在从云端下载备份...', progress: 20 });
-          const fileName = `Sully_Backup_Latest.zip`;
+          const fileName = customFileName || `Sully_Backup_Latest.zip`;
+          
           const blob = await S3BackupClient.downloadBackup(s3Config, fileName);
           
           setSysOperation({ status: 'processing', message: '下载完成，正在解析数据...', progress: 50 });
           
           // Convert Blob to File-like for importSystem
           const file = new File([blob], fileName, { type: 'application/zip' });
+          
           await importSystem(file);
           
           addToast('云端恢复成功', 'success');
