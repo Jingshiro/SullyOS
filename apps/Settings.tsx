@@ -6,11 +6,10 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { safeResponseJson } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
-import S3SettingsModal from '../components/os/S3SettingsModal';
 import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
 import { NotionManager, FeishuManager } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
-import { Sun, Newspaper, NotePencil, Notebook, Book, CloudArrowUp } from '@phosphor-icons/react';
+import { Sun, Newspaper, NotePencil, Notebook, Book } from '@phosphor-icons/react';
 
 const Settings: React.FC = () => {
   const {
@@ -18,8 +17,7 @@ const Settings: React.FC = () => {
       exportSystem, importSystem, addToast, resetSystem,
       apiPresets, addApiPreset, removeApiPreset,
       sysOperation, // Get progress state
-      realtimeConfig, updateRealtimeConfig, // 实时感知配置
-      s3Config
+      realtimeConfig, updateRealtimeConfig // 实时感知配置
   } = useOS();
   
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
@@ -37,15 +35,11 @@ const Settings: React.FC = () => {
   const [showPresetModal, setShowPresetModal] = useState(false);
   const [showRealtimeModal, setShowRealtimeModal] = useState(false);
   const [showActiveMsgModal, setShowActiveMsgModal] = useState(false);
-  const [showS3Modal, setShowS3Modal] = useState(false);
 
-  // Real-time感知配置
+  // 实时感知配置的本地状态
   const [rtWeatherEnabled, setRtWeatherEnabled] = useState(realtimeConfig.weatherEnabled);
-  const [rtWeatherProvider, setRtWeatherProvider] = useState<RealtimeConfig['weatherProvider']>(realtimeConfig.weatherProvider || 'openweathermap');
   const [rtWeatherKey, setRtWeatherKey] = useState(realtimeConfig.weatherApiKey);
-  const [rtWeatherApiHost, setRtWeatherApiHost] = useState(realtimeConfig.weatherApiHost || '');
   const [rtWeatherCity, setRtWeatherCity] = useState(realtimeConfig.weatherCity);
-
   const [rtNewsEnabled, setRtNewsEnabled] = useState(realtimeConfig.newsEnabled);
   const [rtNewsApiKey, setRtNewsApiKey] = useState(realtimeConfig.newsApiKey || '');
   const [rtNotionEnabled, setRtNotionEnabled] = useState(realtimeConfig.notionEnabled);
@@ -217,9 +211,7 @@ const Settings: React.FC = () => {
   const handleSaveRealtimeConfig = () => {
       updateRealtimeConfig({
           weatherEnabled: rtWeatherEnabled,
-          weatherProvider: rtWeatherProvider,
           weatherApiKey: rtWeatherKey,
-          weatherApiHost: rtWeatherApiHost,
           weatherCity: rtWeatherCity,
           newsEnabled: rtNewsEnabled,
           newsApiKey: rtNewsApiKey,
@@ -253,55 +245,13 @@ const Settings: React.FC = () => {
       }
       setRtTestStatus('正在测试...');
       try {
-          if (rtWeatherProvider === 'qweather') {
-              const host = (rtWeatherApiHost || 'devapi.qweather.com').replace(/^https?:\/\//, '').replace(/\/+$/, '');
-              let locationId = rtWeatherCity;
-              const isIdOrCoord = /^\d+$/.test(locationId) || /^-?\d+\.?\d*,-?\d+\.?\d*$/.test(locationId);
-              
-              // 1. 如果不是 ID 或经纬度，先通过 GeoAPI 转换
-              if (!isIdOrCoord) {
-                  setRtTestStatus('正在查询城市 ID...');
-                  // 强制使用专属域名的路径格式 /geo/v2/city/lookup
-                  const geoUrl = `https://${host}/geo/v2/city/lookup?location=${encodeURIComponent(rtWeatherCity)}&key=${rtWeatherKey}`;
-                  const geoRes = await fetch(geoUrl);
-                  if (geoRes.ok) {
-                      const geoData = await safeResponseJson(geoRes);
-                      if (geoData.code === '200' && geoData.location?.[0]) {
-                          locationId = geoData.location[0].id;
-                          const cityName = geoData.location[0].name;
-                          setRtTestStatus(`已匹配城市: ${cityName}(${locationId})，正在获取天气...`);
-                      } else {
-                          setRtTestStatus(`找不到该城市 (代码: ${geoData.code})`);
-                          return;
-                      }
-                  } else {
-                      setRtTestStatus(`GeoAPI 请求失败: ${geoRes.status}`);
-                      return;
-                  }
-              }
-
-              // 2. 使用 LocationID 获取天气
-              const url = `https://${host}/v7/weather/now?location=${encodeURIComponent(locationId)}&key=${rtWeatherKey}&lang=zh`;
-              const res = await fetch(url);
-              if (res.ok) {
-                  const data = await safeResponseJson(res);
-                  if (data.code === '200') {
-                      setRtTestStatus(`连接成功！${rtWeatherCity}: ${data.now.text}, ${data.now.temp}°C (体感 ${data.now.feelsLike}°C)`);
-                  } else {
-                      setRtTestStatus(`天气 API 错误码: ${data.code}`);
-                  }
-              } else {
-                  setRtTestStatus(`天气 API 请求失败: ${res.status}`);
-              }
+          const url = `https://api.openweathermap.org/data/2.5/weather?q=${rtWeatherCity}&appid=${rtWeatherKey}&units=metric&lang=zh_cn`;
+          const res = await fetch(url);
+          if (res.ok) {
+              const data = await safeResponseJson(res);
+              setRtTestStatus(`连接成功！${data.name}: ${data.weather[0]?.description}, ${Math.round(data.main.temp)}°C`);
           } else {
-              const url = `https://api.openweathermap.org/data/2.5/weather?q=${rtWeatherCity}&appid=${rtWeatherKey}&units=metric&lang=zh_cn`;
-              const res = await fetch(url);
-              if (res.ok) {
-                  const data = await safeResponseJson(res);
-                  setRtTestStatus(`连接成功！${data.name}: ${data.weather[0]?.description}, ${Math.round(data.main.temp)}°C`);
-              } else {
-                  setRtTestStatus(`连接失败: HTTP ${res.status}`);
-              }
+              setRtTestStatus(`连接失败: HTTP ${res.status}`);
           }
       } catch (e: any) {
           setRtTestStatus(`网络错误: ${e.message}`);
@@ -454,42 +404,6 @@ const Settings: React.FC = () => {
             <button onClick={() => setShowResetConfirm(true)} className="w-full py-3 bg-red-50 border border-red-100 text-red-500 rounded-xl text-xs font-bold flex items-center justify-center gap-2">
                 格式化系统 (出厂设置)
             </button>
-        </section>
-
-        {/* 云端同步区域 */}
-        <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
-            <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                    <div className="p-2 bg-indigo-100 rounded-xl text-indigo-600">
-                        <CloudArrowUp size={18} weight="bold" />
-                    </div>
-                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">S3 / R2 云端同步</h2>
-                </div>
-                <button onClick={() => setShowS3Modal(true)} className="text-[10px] bg-indigo-100 text-indigo-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
-                    同步配置
-                </button>
-            </div>
-            
-            <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="flex flex-col">
-                    <span className="text-xs font-bold text-slate-600">
-                        {s3Config.endpoint && s3Config.bucketName ? '已配置云端同步' : '未配置云端同步'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 truncate max-w-[180px]">
-                        {s3Config.bucketName || '尚未配置 Bucket'}
-                    </span>
-                </div>
-                <button 
-                    onClick={() => setShowS3Modal(true)}
-                    className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-indigo-500 shadow-sm active:scale-95 transition-all"
-                >
-                    去同步
-                </button>
-            </div>
-            
-            <p className="text-[10px] text-slate-400 mt-3 leading-relaxed pl-1">
-                支持 AWS S3、Cloudflare R2 等兼容服务。一键备份所有数据到云端 Bucket，更换设备或清理缓存后可快速恢复。
-            </p>
         </section>
 
         {/* AI 连接设置区域 */}
@@ -699,44 +613,15 @@ const Settings: React.FC = () => {
                       </label>
                   </div>
                   {rtWeatherEnabled && (
-                      <div className="space-y-3">
+                      <div className="space-y-2">
                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">天气服务提供商</label>
-                              <div className="flex gap-2">
-                                  <button 
-                                      onClick={() => setRtWeatherProvider('openweathermap')}
-                                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all ${rtWeatherProvider === 'openweathermap' ? 'bg-emerald-500 text-white shadow-sm' : 'bg-white text-slate-500 border border-emerald-100'}`}
-                                  >
-                                      OpenWeatherMap
-                                  </button>
-                                  <button 
-                                      onClick={() => setRtWeatherProvider('qweather')}
-                                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold transition-all ${rtWeatherProvider === 'qweather' ? 'bg-emerald-500 text-white shadow-sm' : 'bg-white text-slate-500 border border-emerald-100'}`}
-                                  >
-                                      和风天气 (QWeather)
-                                  </button>
-                              </div>
+                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">OpenWeatherMap API Key</label>
+                              <input type="password" value={rtWeatherKey} onChange={e => setRtWeatherKey(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="获取: openweathermap.org" />
                           </div>
-
                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">API Key</label>
-                              <input type="password" value={rtWeatherKey} onChange={e => setRtWeatherKey(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder={rtWeatherProvider === 'qweather' ? "和风天气 API Key" : "OpenWeatherMap API Key"} />
+                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">城市 (英文)</label>
+                              <input type="text" value={rtWeatherCity} onChange={e => setRtWeatherCity(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm" placeholder="Beijing, Shanghai, etc." />
                           </div>
-
-                          {rtWeatherProvider === 'qweather' && (
-                              <div>
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">API Host (可选专属域名)</label>
-                                  <input type="text" value={rtWeatherApiHost} onChange={e => setRtWeatherApiHost(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm font-mono" placeholder="例: devapi.qweather.com" />
-                              </div>
-                          )}
-
-                          <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">
-                                  {rtWeatherProvider === 'qweather' ? "城市 (ID/经纬度/中文名)" : "城市 (英文)"}
-                              </label>
-                              <input type="text" value={rtWeatherCity} onChange={e => setRtWeatherCity(e.target.value)} className="w-full bg-white/80 border border-emerald-200 rounded-xl px-3 py-2 text-sm" placeholder={rtWeatherProvider === 'qweather' ? "例: 101010100 或 Beijing" : "Beijing, Shanghai, etc."} />
-                          </div>
-                          
                           <button onClick={testWeatherApi} className="w-full py-2 bg-emerald-100 text-emerald-600 text-xs font-bold rounded-xl active:scale-95 transition-transform">测试天气API</button>
                       </div>
                   )}
@@ -934,11 +819,6 @@ const Settings: React.FC = () => {
               </p>
           </div>
       </Modal>
-
-      <S3SettingsModal
-          isOpen={showS3Modal}
-          onClose={() => setShowS3Modal(false)}
-      />
 
     </div>
   );

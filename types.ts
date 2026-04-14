@@ -211,10 +211,8 @@ export interface CharacterBuff {
 export interface RealtimeConfig {
   // 天气配置
   weatherEnabled: boolean;
-  weatherProvider: 'openweathermap' | 'qweather';
-  weatherApiKey: string;  // API Key (OpenWeatherMap or QWeather)
-  weatherApiHost?: string; // QWeather 专属域名 (可选，默认使用公共域名)
-  weatherCity: string;    // 城市名 (OpenWeatherMap 为英文名，QWeather 可为经纬度、城市名或 LocationID)
+  weatherApiKey: string;  // OpenWeatherMap API Key
+  weatherCity: string;    // 城市名
 
   // 新闻配置
   newsEnabled: boolean;
@@ -1056,16 +1054,6 @@ export interface Emoji {
     categoryId?: string; 
 }
 
-export interface S3Config {
-  enabled: boolean;
-  endpoint: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  bucketName: string;
-  region: string;
-  path: string; // Optional folder path e.g., backups/
-}
-
 export interface FullBackupData {
     timestamp: number;
     version: number;
@@ -1074,7 +1062,7 @@ export interface FullBackupData {
     apiPresets?: ApiPreset[];
     availableModels?: string[];
     realtimeConfig?: RealtimeConfig;  // 实时感知配置（天气/新闻/Notion）
-    s3Config?: S3Config; // S3云端同步鉴权信息
+    customIcons?: Record<string, string>;
     customIcons?: Record<string, string>;
     appearancePresets?: AppearancePreset[];
     characters?: CharacterProfile[];

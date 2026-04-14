@@ -1,6 +1,6 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, S3Config } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset } from '../types';
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ChatPrompts } from '../utils/chatPrompts';
@@ -9,7 +9,6 @@ import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
-import { S3BackupClient } from '../utils/s3Client';
 
 const normalizeProactiveAiContent = (raw: string): string => {
   let cleaned = raw;
@@ -76,12 +75,9 @@ const loadJSZip = async (): Promise<JSZipCtorLike> => {
 // 默认实时配置
 const defaultRealtimeConfig: RealtimeConfig = {
   weatherEnabled: false,
-  weatherProvider: 'openweathermap',
   weatherApiKey: '',
-  weatherApiHost: '',
   weatherCity: 'Beijing',
   newsEnabled: false,
-
   newsApiKey: '',
   notionEnabled: false,
   notionApiKey: '',
@@ -187,12 +183,6 @@ interface OSContextType {
   // Logs
   systemLogs: SystemLog[];
   clearLogs: () => void;
-
-  // S3
-  s3Config: S3Config;
-  updateS3Config: (updates: Partial<S3Config>) => void;
-  syncToS3: (customFileName?: string) => Promise<void>;
-  restoreFromS3: (customFileName?: string) => Promise<void>;
 
   // Navigation Logic
   registerBackHandler: (handler: () => boolean) => () => void; // Returns unregister function
@@ -455,17 +445,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // Sys Operation Status
   const [sysOperation, setSysOperation] = useState<{ status: 'idle' | 'processing', message: string, progress: number }>({ status: 'idle', message: '', progress: 0 });
 
-  // S3 Config
-  const [s3Config, setS3Config] = useState<S3Config>({
-      enabled: false,
-      endpoint: '',
-      accessKeyId: '',
-      secretAccessKey: '',
-      bucketName: '',
-      region: 'auto',
-      path: 'backups/'
-  });
-
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interceptorsInitialized = useRef(false);
   
@@ -530,18 +509,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       interceptorsInitialized.current = true;
 
       // 1. Monkey Patch Fetch
-      const originalFetch = window.fetch.bind(window);
+      const originalFetch = window.fetch;
       const patchedFetch = async (...args: [RequestInfo | URL, RequestInit?]) => {
           const [resource, config] = args;
           
-          let urlStr = '';
-          if (typeof resource === 'string') {
-              urlStr = resource;
-          } else if (resource instanceof URL) {
-              urlStr = resource.toString();
-          } else if (resource instanceof Request) {
-              urlStr = resource.url;
-          }
+          const urlStr = String(resource);
           
           try {
               const response = await originalFetch(...args);
@@ -668,16 +640,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             }
         }
 
-        // 加载 S3/R2 配置
-        const savedS3 = localStorage.getItem('os_s3_config');
-        if (savedS3) {
-            try {
-                setS3Config(prev => ({ ...prev, ...JSON.parse(savedS3) }));
-            } catch (e) {
-                console.error('Failed to load S3 config', e);
-            }
-        }
-
         try {
             const assets = await DB.getAllAssets();
             const assetMap: Record<string, string> = {};
@@ -763,12 +725,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         let finalChars = dbChars;
 
-        // ONLY auto-create if there are ZERO characters in the DB
-        if (finalChars.length === 0) {
+        if (!finalChars.some(c => c.id === sullyV2.id)) {
             await DB.saveCharacter(sullyV2);
-            finalChars = [sullyV2];
-        } else if (finalChars.some(c => c.id === sullyV2.id)) {
-            // REPAIR LOGIC: Only run if Sully exists in the DB
+            finalChars = [...finalChars, sullyV2];
+        } else {
+            // REPAIR LOGIC
             const existingSully = finalChars.find(c => c.id === sullyV2.id);
             if (existingSully) {
                  const currentSprites = existingSully.sprites || {};
@@ -1687,8 +1648,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               apiConfig: (mode === 'text_only' || mode === 'full') ? apiConfig : undefined,
               apiPresets: (mode === 'text_only' || mode === 'full') ? apiPresets : undefined,
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
-              realtimeConfig: realtimeConfig, // Always include real-time keys
-              s3Config: s3Config, // Always include S3 auth info
+              realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
               theme: theme, // Include theme in all modes (text/media)
               customIcons: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
                   ? { ...customIcons }
@@ -1955,7 +1915,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.availableModels) saveModels(data.availableModels);
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
-          if (data.s3Config) updateS3Config(data.s3Config); // 恢复云端同步鉴权配置
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
               const existingAssets = await DB.getAllAssets();
@@ -2052,62 +2011,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
 
   const resetSystem = async () => { try { await DB.deleteDB(); localStorage.clear(); window.location.reload(); } catch (e) { console.error(e); addToast('重置失败，请手动清除浏览器数据', 'error'); } };
-
-  const updateS3Config = (updates: Partial<S3Config>) => {
-      const next = { ...s3Config, ...updates };
-      setS3Config(next);
-      localStorage.setItem('os_s3_config', JSON.stringify(next));
-  };
-
-  const syncToS3 = async (customFileName?: string) => {
-      if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
-          throw new Error('S3 / R2 配置不完整');
-      }
-      
-      try {
-          setSysOperation({ status: 'processing', message: '正在准备备份数据...', progress: 10 });
-          const blob = await exportSystem('full');
-          
-          setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 80 });
-
-          const fileName = customFileName || `Sully_Backup_Latest.zip`;
-          await S3BackupClient.uploadBackup(s3Config, fileName, blob);
-          
-          setSysOperation({ status: 'idle', message: '', progress: 100 });
-          addToast('云端备份成功', 'success');
-      } catch (e: any) {
-          setSysOperation({ status: 'idle', message: '', progress: 0 });
-          addToast(`备份失败: ${e.message}`, 'error');
-          throw e;
-      }
-  };
-
-  const restoreFromS3 = async (customFileName?: string) => {
-      if (!s3Config.endpoint || !s3Config.accessKeyId || !s3Config.secretAccessKey || !s3Config.bucketName) {
-          throw new Error('S3 / R2 配置不完整');
-      }
-
-      try {
-          setSysOperation({ status: 'processing', message: '正在从云端下载备份...', progress: 20 });
-          const fileName = customFileName || `Sully_Backup_Latest.zip`;
-          
-          const blob = await S3BackupClient.downloadBackup(s3Config, fileName);
-          
-          setSysOperation({ status: 'processing', message: '下载完成，正在解析数据...', progress: 50 });
-          
-          // Convert Blob to File-like for importSystem
-          const file = new File([blob], fileName, { type: 'application/zip' });
-          
-          await importSystem(file);
-          
-          addToast('云端恢复成功', 'success');
-      } catch (e: any) {
-          setSysOperation({ status: 'idle', message: '', progress: 0 });
-          addToast(`恢复失败: ${e.message}`, 'error');
-          throw e;
-      }
-  };
-
   const openApp = (appId: AppID) => setActiveApp(appId);
   const closeApp = () => setActiveApp(AppID.Launcher);
   const unlock = () => setIsLocked(false);
@@ -2209,10 +2112,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     sysOperation,
     systemLogs,
     clearLogs,
-    s3Config,
-    updateS3Config,
-    syncToS3,
-    restoreFromS3,
     registerBackHandler,
     handleBack,
     suspendedCall,
