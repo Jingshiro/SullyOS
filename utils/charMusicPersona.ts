@@ -168,8 +168,14 @@ const buildPersonaPrompt = (char: CharacterProfile, user: UserProfile): { sys: s
 要求:
 1. 艺人必须是真实存在、可以在网易云搜到的华语 / 日系 / 英语 / 韩语艺人（不要虚构）
 2. 曲风标签要具体 (shoegaze / city-pop / post-rock / 民谣 / trip-hop / R&B / 后朋克 ...)，避免泛泛 ("流行"/"摇滚")
-3. 歌单概念要和角色精神内核呼应，不要套路化
-4. bio 用角色自己的口吻写（第一人称），一句话即可，不超过30字
+3. **3 个歌单必须主题彻底不同** —— 不是"3 个差不多但换了名字"，而是 3 个**真正不同的场景 / 心境 / 用途**，
+   彼此 mood、曲风、使用场合都要分开。可以参考维度 (任选 3 个不同的)：
+   - 时段 / 场合：深夜独处｜清晨通勤｜失眠｜暴雨天｜长途车里｜聚会前的换装｜写作中｜失恋后
+   - 情绪：发泄｜治愈｜怀旧｜亢奋｜慵懒｜思考｜浪漫
+   - 表达方式：自我对话｜送给某个特定人｜对世界的反抗｜逃避现实
+   严禁出现两个歌单 mood 一致、或描述里讲同一件事的情况。
+4. 歌单标题 / 描述 / mood 都要从角色精神内核出发，不要套路化（不要"我的最爱"/"循环单"这种通用名）
+5. bio 用角色自己的口吻写（第一人称），一句话即可，不超过30字
 
 只输出 JSON，不要任何解释:
 {
@@ -177,8 +183,9 @@ const buildPersonaPrompt = (char: CharacterProfile, user: UserProfile): { sys: s
   "genreTags": ["...", "...", "...(3-5个)"],
   "signatureArtists": [{"name":"真实艺人名"}, ... (3-6个)],
   "playlists": [
-    {"title":"歌单名(短)", "description":"(角色口吻, 1-2句)", "mood":"dreamy|nostalgic|chill|sad|romantic|epic|happy|angry"},
-    ...(共3个)
+    {"title":"歌单A(短·独特场景)", "description":"(角色口吻, 1-2句, 说清楚什么时候听 / 为什么)", "mood":"从下面8个里选一个: happy|sad|romantic|angry|chill|epic|nostalgic|dreamy"},
+    {"title":"歌单B(短·和A完全不同的场景/心境)", "description":"...", "mood":"必须和A不同"},
+    {"title":"歌单C(短·和A、B都不同)", "description":"...", "mood":"必须和A、B都不同"}
   ]
 }`;
 

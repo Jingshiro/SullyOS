@@ -233,12 +233,12 @@ export const ChatPrompts = {
         //     - 异步（可选）：拉一段歌词片段让这首歌真能影响 char 心境
         try {
             let charListening: {
-                songName: string; artists: string; vibe?: string; lyricSnippet?: string[];
+                songId?: number; songName: string; artists: string; vibe?: string; lyricSnippet?: string[];
             } | null = null;
             try {
                 const cur = computeCurrentListening(char, schedule);
                 if (cur) {
-                    charListening = { songName: cur.songName, artists: cur.artists, vibe: cur.vibe };
+                    charListening = { songId: cur.songId, songName: cur.songName, artists: cur.artists, vibe: cur.vibe };
                     // 拉歌词。优先用调用方传进来的 cfg；没传就从 localStorage 取
                     // —— Proactive / activeMsgClient 走这条路也能享受到歌词。
                     const cfgForLyric = musicCfg?.workerUrl ? musicCfg : loadMusicCfgStandalone();

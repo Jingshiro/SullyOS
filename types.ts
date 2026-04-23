@@ -714,6 +714,16 @@ export interface CharPlaylistSong {
     albumPic: string;
     duration: number;
     fee: number;
+    /**
+     * 'user' = 这首是从 user 那里"抄"过来的（user 在听 → char 加进自己歌单）。
+     * 'discovered' = char 自己探索 / 初始化时找到的。
+     * 不写默认按 'discovered' 处理（向后兼容已有数据）。
+     * 用途：当 char 后续"在听"这首时，prompt 会告诉 LLM "这是从 user 那儿收来的"，
+     * 让记忆/对话能自然带上这层关系，而不是当成一首中立的歌。
+     */
+    source?: 'user' | 'discovered';
+    /** 加入歌单时间，用来排序 / 显示"最近收藏" */
+    addedAt?: number;
 }
 
 export interface CharPlaylist {

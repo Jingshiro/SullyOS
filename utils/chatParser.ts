@@ -13,13 +13,33 @@ export interface MusicActionSnapshot {
     fee: number;
 }
 
+/**
+ * 把 user 的歌加到 char 的歌单时，char 可以指定目标：
+ * - 不传 target → 默认放进第一个歌单（兼容老 [[MUSIC_ACTION:add]]）
+ * - target.kind === 'existing' → 按标题模糊匹配现有歌单；匹配不到回落到第一个
+ * - target.kind === 'new' → 现场新建一个歌单，把这首作为第一首
+ *
+ * 不论哪种，存入 char 歌单时都会打上 source: 'user' 标签，让 char 之后"听"
+ * 这首歌时知道是从 user 那里收来的（prompt 注入会用到）。
+ */
+export type AddSongTarget =
+    | { kind: 'existing'; title: string }
+    | { kind: 'new'; title: string; description?: string };
+
 export interface MusicActionHooks {
     /** 返回 user 此刻正在听的歌快照（chatParser 自己不去碰 MusicContext） */
     getListeningSnapshot: () => MusicActionSnapshot | null;
     /** 将 charId 加入"一起听"名单（chatParser 不维护状态，只通知） */
     joinListeningTogether: (charId: string) => void;
-    /** 把 song 加到 char 的某个歌单（默认第一个），返回歌单标题用于 toast */
-    addSongToCharPlaylist: (charId: string, song: CharPlaylistSong) => Promise<{ playlistTitle: string } | null>;
+    /**
+     * 把 song 加到 char 的歌单。
+     * 返回 { playlistTitle, created } —— created=true 表示这次是新建了歌单。
+     */
+    addSongToCharPlaylist: (
+        charId: string,
+        song: CharPlaylistSong,
+        target?: AddSongTarget,
+    ) => Promise<{ playlistTitle: string; created: boolean } | null>;
 }
 
 export const ChatParser = {
@@ -47,17 +67,47 @@ export const ChatParser = {
         }
 
         // MUSIC_ACTION — char 对 user 正在听的歌表态（只处理第一次出现，每条消息最多一次插卡）
-        const musicMatch = content.match(/\[\[MUSIC_ACTION:(join|add|join_and_add)\]\]/);
+        // 支持的格式（后两种是为了让 char 自己挑歌单 / 新建歌单）：
+        //   [[MUSIC_ACTION:join]]
+        //   [[MUSIC_ACTION:add]]                              → 默认放第一个歌单
+        //   [[MUSIC_ACTION:add|歌单标题]]                      → 放进现有歌单（标题匹配）
+        //   [[MUSIC_ACTION:add_new|新歌单标题|可选描述]]        → 新建歌单
+        //   [[MUSIC_ACTION:join_and_add(|...)]]              → 同 add 一套
+        //   [[MUSIC_ACTION:join_and_add_new|新歌单标题|描述]]  → 同 add_new
+        // 用 | 分隔参数，避免和 : 冲突（标题里很容易出现 :)
+        const MUSIC_TAG_RE = /\[\[MUSIC_ACTION:(join|add|add_new|join_and_add|join_and_add_new)(?:\|([^\]]*))?\]\]/;
+        const MUSIC_TAG_GLOBAL_RE = /\[\[MUSIC_ACTION:(?:join|add|add_new|join_and_add|join_and_add_new)(?:\|[^\]]*)?\]\]/g;
+        const musicMatch = content.match(MUSIC_TAG_RE);
         if (musicMatch && musicHooks) {
-            const intent = musicMatch[1] as 'join' | 'add' | 'join_and_add';
+            const verb = musicMatch[1] as 'join' | 'add' | 'add_new' | 'join_and_add' | 'join_and_add_new';
+            const argsRaw = (musicMatch[2] || '').trim();
+            const args = argsRaw ? argsRaw.split('|').map(s => s.trim()).filter(Boolean) : [];
+            // 卡片元数据里只用 join / add / join_and_add 三种意图，把 _new 折叠回 add 系
+            const intent: 'join' | 'add' | 'join_and_add' =
+                verb === 'join' ? 'join'
+                : (verb === 'add' || verb === 'add_new') ? 'add'
+                : 'join_and_add';
+            const wantsJoin = verb === 'join' || verb === 'join_and_add' || verb === 'join_and_add_new';
+            const wantsAdd = verb !== 'join';
+
+            let target: AddSongTarget | undefined;
+            if (wantsAdd) {
+                if (verb === 'add_new' || verb === 'join_and_add_new') {
+                    // 至少要有标题；没标题就退化成默认 add
+                    if (args[0]) target = { kind: 'new', title: args[0], description: args[1] };
+                } else if (args[0]) {
+                    target = { kind: 'existing', title: args[0] };
+                }
+            }
+
             const snap = musicHooks.getListeningSnapshot();
             if (snap) {
-                // 副作用：一起听 / 加入歌单
                 let addedToPlaylistTitle: string | undefined;
-                if (intent === 'join' || intent === 'join_and_add') {
+                let playlistCreated = false;
+                if (wantsJoin) {
                     musicHooks.joinListeningTogether(charId);
                 }
-                if (intent === 'add' || intent === 'join_and_add') {
+                if (wantsAdd) {
                     try {
                         const playlistSong: CharPlaylistSong = {
                             id: snap.songId,
@@ -67,9 +117,14 @@ export const ChatParser = {
                             albumPic: snap.albumPic,
                             duration: snap.duration,
                             fee: snap.fee,
+                            source: 'user',
+                            addedAt: Date.now(),
                         };
-                        const added = await musicHooks.addSongToCharPlaylist(charId, playlistSong);
-                        if (added) addedToPlaylistTitle = added.playlistTitle;
+                        const added = await musicHooks.addSongToCharPlaylist(charId, playlistSong, target);
+                        if (added) {
+                            addedToPlaylistTitle = added.playlistTitle;
+                            playlistCreated = added.created;
+                        }
                     } catch { /* 忽略 */ }
                 }
                 await DB.saveMessage({
@@ -81,22 +136,25 @@ export const ChatParser = {
                         intent,
                         song: snap,
                         addedToPlaylistTitle,
+                        playlistCreated,
                     },
                 });
+                const playlistSuffix = addedToPlaylistTitle
+                    ? (playlistCreated ? `（新建《${addedToPlaylistTitle}》）` : `《${addedToPlaylistTitle}》`)
+                    : '';
                 addToast(
                     intent === 'join' ? `${charName} 和你一起听` :
-                    intent === 'add' ? `${charName} 把这首加到了自己歌单` :
-                    `${charName} 和你一起听，也加到了歌单`,
+                    intent === 'add' ? `${charName} 把这首加到了${playlistSuffix || '自己歌单'}` :
+                    `${charName} 和你一起听，也加到了${playlistSuffix || '歌单'}`,
                     'info'
                 );
             }
-            // 无论成功与否，去掉 tag
             content = content.replace(musicMatch[0], '').trim();
-            // 其他同类 tag 也清理（防止 LLM 插多次）
-            content = content.replace(/\[\[MUSIC_ACTION:(?:join|add|join_and_add)\]\]/g, '').trim();
+            // 同类 tag 全清，防止 LLM 一条消息里插多次
+            content = content.replace(MUSIC_TAG_GLOBAL_RE, '').trim();
         } else if (musicMatch) {
-            // 没有 hooks（比如无音乐上下文）— 静默丢弃
-            content = content.replace(/\[\[MUSIC_ACTION:(?:join|add|join_and_add)\]\]/g, '').trim();
+            // 没有 hooks（无音乐上下文）— 静默丢弃
+            content = content.replace(MUSIC_TAG_GLOBAL_RE, '').trim();
         }
 
         // ADD_EVENT

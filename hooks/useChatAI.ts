@@ -2104,24 +2104,76 @@ export const useChatAI = ({
                 joinListeningTogether: (cid: string) => {
                     music.addListeningPartner(cid);
                 },
-                addSongToCharPlaylist: async (cid, song) => {
+                addSongToCharPlaylist: async (cid, song, target) => {
                     try {
                         const all = await DB.getAllCharacters();
-                        const target = all.find(c => c.id === cid);
-                        if (!target) return null;
-                        const profile = target.musicProfile;
-                        if (!profile || profile.playlists.length === 0) return null;
-                        // 找一个已命名的歌单（默认第一个），去重
-                        const pl = profile.playlists[0];
-                        if (pl.songs.find(s => s.id === song.id)) return { playlistTitle: pl.title };
-                        const updatedPl = { ...pl, songs: [...pl.songs, song], updatedAt: Date.now() };
-                        const updatedProfile = {
-                            ...profile,
-                            playlists: profile.playlists.map(p => p.id === pl.id ? updatedPl : p),
-                            updatedAt: Date.now(),
-                        };
-                        await DB.saveCharacter({ ...target, musicProfile: updatedProfile });
-                        return { playlistTitle: pl.title };
+                        const targetChar = all.find(c => c.id === cid);
+                        if (!targetChar) return null;
+                        const profile = targetChar.musicProfile;
+                        if (!profile) return null;
+
+                        const now = Date.now();
+                        let playlists = profile.playlists.slice();
+                        let chosenIdx = -1;
+                        let created = false;
+
+                        if (target?.kind === 'new') {
+                            // 新建歌单 — 标题去重（已存在同名就当成 existing 处理）
+                            const dup = playlists.findIndex(p =>
+                                p.title.trim().toLowerCase() === target.title.trim().toLowerCase());
+                            if (dup >= 0) {
+                                chosenIdx = dup;
+                            } else {
+                                playlists.push({
+                                    id: `pl-${now}-${playlists.length}`,
+                                    title: target.title.trim(),
+                                    description: (target.description || '').trim(),
+                                    coverStyle: `gradient-0${(playlists.length % 6) + 1}`,
+                                    songs: [],
+                                    createdAt: now,
+                                    updatedAt: now,
+                                });
+                                chosenIdx = playlists.length - 1;
+                                created = true;
+                            }
+                        } else if (target?.kind === 'existing') {
+                            // 按标题模糊匹配（先精确，再 includes）
+                            const t = target.title.trim().toLowerCase();
+                            chosenIdx = playlists.findIndex(p => p.title.trim().toLowerCase() === t);
+                            if (chosenIdx < 0) chosenIdx = playlists.findIndex(p =>
+                                p.title.trim().toLowerCase().includes(t) || t.includes(p.title.trim().toLowerCase()));
+                            // 匹配不到 → 回落到第一个（保持加歌成功，而不是无声失败）
+                            if (chosenIdx < 0 && playlists.length > 0) chosenIdx = 0;
+                        } else {
+                            if (playlists.length > 0) chosenIdx = 0;
+                        }
+
+                        // 实在没歌单可用（角色 profile 但 playlists 空 + 未指定 new）→ 自动建一个收藏夹
+                        if (chosenIdx < 0) {
+                            playlists.push({
+                                id: `pl-${now}-0`,
+                                title: '我喜欢的音乐',
+                                description: '',
+                                coverStyle: 'gradient-01',
+                                songs: [],
+                                createdAt: now,
+                                updatedAt: now,
+                            });
+                            chosenIdx = 0;
+                            created = true;
+                        }
+
+                        const pl = playlists[chosenIdx];
+                        if (pl.songs.find(s => s.id === song.id)) {
+                            // 已经在这个歌单里了 — 仍然返回成功，让上层 toast 表现一致
+                            return { playlistTitle: pl.title, created: false };
+                        }
+                        const updatedPl = { ...pl, songs: [...pl.songs, song], updatedAt: now };
+                        playlists[chosenIdx] = updatedPl;
+
+                        const updatedProfile = { ...profile, playlists, updatedAt: now };
+                        await DB.saveCharacter({ ...targetChar, musicProfile: updatedProfile });
+                        return { playlistTitle: pl.title, created };
                     } catch {
                         return null;
                     }
