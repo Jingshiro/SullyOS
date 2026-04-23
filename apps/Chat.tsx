@@ -564,19 +564,34 @@ const Chat: React.FC = () => {
         return () => window.removeEventListener('emotion-updated', handler);
     }, [activeCharacterId, updateCharacter]);
 
-    // 🛟 人格抢救：进聊天后发现角色被卡在"情感型 0.3"默认值，强制弹窗重跑一次检测
-    // 触发条件必须是两个值都显式命中默认，且这个角色历史上还没抢救过
+    // 🛟 人格抢救：进聊天后发现角色被卡在"情感型 0.3"显示（真实存储可能是 emotional/0.3，
+    // 也可能是 undefined —— UI 的 `|| 'emotional'` 和 `?? 0.3` fallback 让两者看起来一样）。
+    // 触发后强制弹窗重跑一次检测，每个角色只抢救一次（rescuedKey）。
     useEffect(() => {
         if (!char) return;
         const style = (char as any).personalityStyle;
         const rumination = (char as any).ruminationTendency;
-        if (style !== 'emotional' || rumination !== 0.3) return;
-
         const rescuedKey = `mp_personality_rescued_v1_${char.id}`;
-        if (localStorage.getItem(rescuedKey)) return;
-
+        const alreadyRescued = !!localStorage.getItem(rescuedKey);
         const mpLLM = memoryPalaceConfig?.lightLLM;
-        if (!mpLLM?.baseUrl || !mpLLM?.apiKey) return;
+        const hasLLM = !!(mpLLM?.baseUrl && mpLLM?.apiKey);
+
+        // "UI 显示 情感型 0.3"的所有情况：
+        // - 完整命中 emotional + 0.3
+        // - 完全 undefined/null（从未检测过或失败后没写回）
+        // - 半命中（一项真实一项 fallback）—— 也按可疑处理
+        const styleSuspect = style === 'emotional' || style == null;
+        const rumSuspect = rumination === 0.3 || rumination == null;
+        const isSuspectDefault = styleSuspect && rumSuspect;
+
+        console.log(`🛟 [PersonalityRescue] 检查 ${char.name}: personalityStyle=${JSON.stringify(style)} ruminationTendency=${JSON.stringify(rumination)} suspectDefault=${isSuspectDefault} alreadyRescued=${alreadyRescued} hasLLM=${hasLLM}`);
+
+        if (!isSuspectDefault) return;
+        if (alreadyRescued) return;
+        if (!hasLLM) {
+            console.warn(`🛟 [PersonalityRescue] ${char.name} 命中可疑默认值，但未配置副 API，跳过抢救`);
+            return;
+        }
 
         // 已经在抢救同一个角色就不重复触发
         if (personalityRescue.open && personalityRescue.charId === char.id) return;
@@ -587,7 +602,7 @@ const Chat: React.FC = () => {
         const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
 
         setPersonalityRescue({ open: true, charId: rescueCharId, charName: rescueCharName, phase: 'rescuing' });
-        console.log(`🛟 [PersonalityRescue] ${rescueCharName} 当前是"情感型 0.3"默认值，弹窗抢救中...`);
+        console.log(`🛟 [PersonalityRescue] ${rescueCharName} 命中可疑默认值（情感型 0.3 或 undefined），弹窗抢救中...`);
 
         (async () => {
             try {
