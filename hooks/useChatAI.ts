@@ -2387,7 +2387,10 @@ export const useChatAI = ({
                 : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
             if (char.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM.baseUrl) {
                 const charName = char.name;
-                setMemoryPalaceStatus(`${charName}正在回味你们的对话…`);
+                // 不再预置"正在回味"状态：pipeline 会在水位线未到时立刻 skip，
+                // 预置状态会让"沉思"指示器一闪让用户误以为在干活。
+                // onProgress 在 pipeline 真正进入处理路径后（过完 hot_zone/threshold 检查）
+                // 才首次触发 setMemoryPalaceStatus，这样 skip 路径下指示器不会亮。
 
                 // 缓冲区处理（LLM提取 + Embedding向量化）
                 const recentMsgs = await DB.getRecentMessagesByCharId(char.id, 50);
