@@ -25,12 +25,21 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
         rewrite: () => '/v1/t2a_v2',
+        // Route to 国服 / 海外 based on X-MiniMax-Region header sent by the client.
+        router: (req) => {
+          const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
+          return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
+        },
       },
       '/api/minimax/get-voice': {
         target: 'https://api.minimaxi.com',
         changeOrigin: true,
         secure: true,
         rewrite: () => '/v1/get_voice',
+        router: (req) => {
+          const region = String(req.headers['x-minimax-region'] || '').toLowerCase();
+          return region === 'overseas' ? 'https://api.minimax.io' : 'https://api.minimaxi.com';
+        },
       },
     }
   },

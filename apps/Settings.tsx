@@ -28,6 +28,9 @@ const Settings: React.FC = () => {
   const [localModel, setLocalModel] = useState(apiConfig.model);
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
+  const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
+    apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic'
+  );
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
   
@@ -154,6 +157,7 @@ const Settings: React.FC = () => {
       setLocalModel(apiConfig.model);
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
+      setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
   }, [apiConfig]);
 
   const loadPreset = (preset: typeof apiPresets[0]) => {
@@ -181,11 +185,12 @@ const Settings: React.FC = () => {
   };
 
   const handleSaveApi = () => {
-    updateApiConfig({ 
-      apiKey: localKey, 
+    updateApiConfig({
+      apiKey: localKey,
       minimaxApiKey: localMiniMaxKey,
       minimaxGroupId: localMiniMaxGroupId,
-      baseUrl: localUrl, 
+      minimaxRegion: localMiniMaxRegion,
+      baseUrl: localUrl,
       model: localModel
     });
     setStatusMsg('配置已保存');
@@ -650,6 +655,31 @@ const Settings: React.FC = () => {
                 <div className="group">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
                     <input type="password" value={localKey} onChange={(e) => setLocalKey(e.target.value)} placeholder="sk-..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
+                </div>
+
+                <div className="group">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">MiniMax 服务器</label>
+                    <div className="flex bg-white/50 border border-slate-200/60 rounded-xl p-1 gap-1">
+                        <button
+                            type="button"
+                            onClick={() => setLocalMiniMaxRegion('domestic')}
+                            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${localMiniMaxRegion === 'domestic' ? 'bg-primary text-white shadow-sm' : 'text-slate-600 active:bg-white/60'}`}
+                        >
+                            国服
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setLocalMiniMaxRegion('overseas')}
+                            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${localMiniMaxRegion === 'overseas' ? 'bg-primary text-white shadow-sm' : 'text-slate-600 active:bg-white/60'}`}
+                        >
+                            海外
+                        </button>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 pl-1">
+                        {localMiniMaxRegion === 'overseas'
+                            ? '海外站（api.minimax.io）— 请使用海外账号签发的 Key。'
+                            : '国服（api.minimaxi.com）— 默认，适配国内账号。'}
+                    </p>
                 </div>
 
                 <div className="group">

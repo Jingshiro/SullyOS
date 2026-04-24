@@ -7,6 +7,7 @@ import { ChatPrompts } from '../utils/chatPrompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
+import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 
@@ -251,10 +252,11 @@ const defaultTheme: OSTheme = {
 };
 
 const defaultApiConfig: APIConfig = {
-  baseUrl: '', 
+  baseUrl: '',
   apiKey: '',
   minimaxApiKey: '',
   minimaxGroupId: '',
+  minimaxRegion: 'domestic',
   model: 'gpt-4o-mini',
 };
 
@@ -1124,6 +1126,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   charactersRef.current = characters;
   const apiConfigRef = useRef(apiConfig);
   apiConfigRef.current = apiConfig;
+
+  // Keep the MiniMax endpoint module in sync with the user's region choice
+  // so every minimaxFetch() call reads the latest preference.
+  useEffect(() => {
+    setMinimaxRegion(apiConfig.minimaxRegion);
+  }, [apiConfig.minimaxRegion]);
   const userProfileRef = useRef(userProfile);
   userProfileRef.current = userProfile;
   const groupsRef = useRef(groups);

@@ -276,9 +276,13 @@ const VoiceDesignerApp: React.FC = () => {
       addToast('正在合成长音频并克隆声音，请稍候...', 'success');
 
       const groupId = (apiConfig.minimaxGroupId || '').trim();
+      const region = apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic';
       const res = await fetch('/api/minimax/bake-voice', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-MiniMax-Region': region,
+        },
         body: JSON.stringify({
           apiKey,
           voiceId: customVoiceId,
@@ -286,6 +290,7 @@ const VoiceDesignerApp: React.FC = () => {
           // Pass the current TTS payload so server can synthesize a long sample
           ttsPayload: payload,
           groupId: groupId || undefined,
+          region,
         }),
       });
       const data = await safeResponseJson(res);

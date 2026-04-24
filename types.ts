@@ -129,11 +129,17 @@ export interface VirtualTime {
   day: string;
 }
 
+export type MinimaxRegion = 'domestic' | 'overseas';
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
+  // 'domestic' → https://api.minimaxi.com (国内站)
+  // 'overseas' → https://api.minimax.io  (海外站)
+  // Missing / unknown falls back to domestic.
+  minimaxRegion?: MinimaxRegion;
   model: string;
 }
 
