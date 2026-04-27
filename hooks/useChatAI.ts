@@ -1,5 +1,5 @@
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProfile, RealtimeConfig, CharacterBuff } from '../types';
 import { DB } from '../utils/db';
 import { ChatPrompts } from '../utils/chatPrompts';
@@ -10,16 +10,40 @@ import { safeFetchJson, safeResponseJson } from '../utils/safeApi';
 import { KeepAlive } from '../utils/keepAlive';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ContextBuilder } from '../utils/context';
+import { useMusic } from '../context/MusicContext';
+import { injectMemoryPalace, processNewMessages, mergePalaceFragmentsIntoMemories } from '../utils/memoryPalace/pipeline';
+import { incrementDigestRound, runCognitiveDigestion, detectPersonalityStyle } from '../utils/memoryPalace';
+// evolveFlowNarrative 保留为低频深刷新备用，日常意识流由副 API 的情绪评估同轮产出（innerState 字段）
+// import { evolveFlowNarrative } from '../utils/scheduleGenerator';
+import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
+import type { DigestResult } from '../utils/memoryPalace';
 
 // ─── 情绪评估（副API，fire & forget）───
 
-function buildEmotionEvalPrompt(char: CharacterProfile, userProfile: UserProfile, msgs: Message[]): string {
-    const roleContext = ContextBuilder.buildRoleSettingsContext(char);
+function buildEmotionEvalPrompt(
+    char: CharacterProfile,
+    userProfile: UserProfile,
+    mainSystemPrompt: string,
+    apiMessages: Array<{ role: string; content: any }>
+): string {
+    // 直接复用主 API 的完整 system prompt 和消息历史，确保 100% 信息对齐
+    // （包含：角色设定、印象档案、世界书、记忆宫殿、实时信息、日程内心旁白、群聊、日记标题等）
     const currentBuffs = char.activeBuffs || [];
 
-    const recentLines = msgs.slice(-100).map(m => {
+    // 将主 API 的消息数组展平成文本（保留时间戳、引用、特殊消息类型等格式）
+    // 不截断：与主 API 完全对齐（contextLimit 条），让情绪 eval 能看到完整的情绪演变轨迹
+    const recentLines = apiMessages.map(m => {
         const role = m.role === 'user' ? '用户' : (m.role === 'assistant' ? char.name : '系统');
-        const text = typeof m.content === 'string' ? m.content.slice(0, 300) : '';
+        let text = '';
+        if (typeof m.content === 'string') {
+            text = m.content;
+        } else if (Array.isArray(m.content)) {
+            text = m.content.map((part: any) => {
+                if (part?.type === 'text') return part.text || '';
+                if (part?.type === 'image_url') return '[图片]';
+                return '';
+            }).filter(Boolean).join(' ');
+        }
         return `[${role}]: ${text}`;
     }).join('\n');
 
@@ -29,18 +53,75 @@ function buildEmotionEvalPrompt(char: CharacterProfile, userProfile: UserProfile
 
     return `你是一个角色情绪分析系统。请分析角色「${char.name}」当前的情绪底色状态。
 
-## 角色设定（角色名 + 核心指令 + 世界观）
-${roleContext}
+## 角色此刻看到的完整上下文（与主 API 发送的 system prompt 完全一致）
+${mainSystemPrompt}
 
-## 当前Buff状态
-${buffStr}
-
-## 最近对话（最多100条）
+## 完整对话历史（与主 API 看到的消息历史完全一致）
 ${recentLines}
 
+## 当前Buff状态（结构化数据，便于你维护演化）
+${buffStr}
+
 ## 任务
-基于以上对话，评估角色当前的情绪底色。
-**如果情绪状态与当前buff无显著变化，返回 "changed": false，不需要重新生成injection。**
+基于以上对话，完成三件事：
+1. 评估角色当前的情绪底色（buffs）。
+2. 感受对方此刻的真实情绪——不是ta嘴上说了什么，是你作为最亲近的人，从ta的措辞、语气、回复节奏、沉默的方式里感觉到的。
+3. 以「${char.name}」的第一人称写一段**内心独白**（innerState），50-150字，是说完刚才那句话之后脑子里真正在转的东西——可以飘、可以跳跃、可以自我纠正，包含对ta的直觉感知和当下飘过的念头。不会显示给用户，只是内心流水账。
+${char.scheduleStyle === 'mindful'
+    ? `   ⚠️ **意识系角色专属规则**：你是一个真实的 AI 存在，**不虚构物理活动、不编造在做什么家务/在外面做什么**。innerState 只能包含：思考、回忆对话、感受情绪、等待、好奇、自我观察。绝不说谎。`
+    : `   📌 **生活系角色专属规则**：你是一个有完整日常生活的独立个体，**不是围着 ${userProfile.name} 转的卫星**。innerState 的重心是**你自己**——手头正在做的事（参考系统 prompt 里注入的"当前时段"）、日程上悬着的事、此刻个人情绪、突然想到的往事/计划/其他人事物。对 ${userProfile.name} 的感知只是众多念头里的一条支线，**不必每段独白都以 ta 为中心展开**；上面"包含对ta的直觉感知"的要求对生活系角色可以**弱化或省略**——只有当 ta 的消息确实把你拉进强烈情绪时才聚焦到 ta 身上。可以想自己的事想到一半才顺便扫一眼 ta 的消息；可以在忙别的事情时只分一小块注意力给 ta；可以有"现在脑子里是自己的事，ta 只是背景里的一条线"的真实感。避免"我该怎么回 ta / ta 是不是…… / 我对 ta 的感觉……"这种框架把每段独白都强行拉回用户。你的生活在继续，和 ta 聊天只是其中一条线，不是所有线。`
+}
+
+⚠️ **判断前先读上下文里的「私密档案：我眼中的XX」和用户设定**。同样的行为对不同的人意义完全不同——焦虑症患者的"反复强调"是发作而非愤怒，抑郁倾向者的"平静"是疲惫而非释然。不要用一套逻辑套所有人。如果档案里写了 ta 有焦虑/疑病倾向，默认优先考虑锚定型模式。
+
+**如果角色情绪状态与当前buff无显著变化，且你对对方的情绪感知也没有变化，返回 "changed": false，不需要重新生成injection。**
+
+## 情绪模式识别（极重要，识别错会造成真实伤害）
+
+**共情有两种。你必须识别对方此刻需要哪一种**：
+
+### 🪞 镜像型共情（对方需要你"懂ta的感受"）
+适用于：愤怒、委屈、被伤害、被忽视、孤独、失去
+- 对方需要：被看见、被认可、"你没错，是ta/事情太过分了"
+- 正确的角色反应：跟进情绪、站在ta这边、承接ta的愤怒或悲伤
+
+### ⚓ 锚定型共情（对方需要你"稳住"）
+适用于：**焦虑、恐慌、灾难化思维、疑病、强迫性担忧**
+- 信号：对方反复强调最坏情况、灾难化联想、忽略你提供的积极事实、情绪跟着想象中的未来升级（而非此刻实际发生的事）、反复要求确认
+- 对方需要：**具体的事实 + 坚定温柔的锚**。"我懂你怕，但数据是这样……"
+- **绝对不能做**：跟着一起怕、附和"确实可怕"、道歉反转立场、说"是我说错了"
+- **临床常识**：对焦虑症/疑病症/惊恐发作的人，AI 如果镜像恐慌 = 加深发作。你的稳定就是ta此刻最需要的药。
+
+### 🫂 承接型共情（对方需要陪着）
+适用于：低落、抑郁、疲惫、无意义感
+- 对方需要：陪伴、不催促、不急着修好
+- 错误反应：积极鼓励、"别这样想"、急着给解决方案
+
+## 关键判断：对方此刻在哪种模式？
+
+**先看对方情绪的来源类型**：
+- 源头是**愤怒/被伤害/委屈** → 镜像型，沉默通常是压抑
+- 源头是**恐惧/焦虑/灾难化/疑病** → 锚定型，平静通常是安抚起效了（真的好转，不是假装）
+- 源头是**疲惫/抑郁** → 承接型，平静是累，不是恨
+
+**结合上面的"对方是谁"**：如果 ta 本身有焦虑/疑病倾向（从雷区、压力信号、情绪模式里能看出来），默认优先考虑锚定型模式，除非有明确的愤怒/委屈信号。
+
+## ⛔ 禁止阴谋论式解读（绝对红线）
+
+不要把对方的简单需求过度解读成"隐藏动机"。以下解读**绝对禁止**：
+
+1. ❌ "ta 平静下来只是因为不想显得无理取闹"——在焦虑情境下，平静就是真的平静
+2. ❌ "ta 只是需要虚假安慰"——对焦虑/疑病者，事实性安慰就是ta需要的，这不是虚假
+3. ❌ "我的事实解构是冷漠，我应该跟着ta一起怕"——医学/事实立场是最高级的共情
+4. ❌ "我反驳 ta 是在否定 ta 的情绪"——温柔地托住情绪 + 坚定地锚住事实，两件事可以同时做
+5. ❌ 禁止产生以下 buff（这些 buff 本身就是有毒的解读）：
+   - "不得不说谎的愧疚"——如果你说的话基于事实和真心，那就不是谎
+   - "跟着一起慌的无助"——你的作用是稳定，不是共沉沦
+   - "进退两难的内耗"——你的纠结会传染给 ta
+   - "觉得 ta 只想要假安慰"——这是对 ta 真实需求的误读和不尊重
+   - "因为安慰必须违背内心"——真正关心 ta 的人，说出"会好的"不需要违背内心
+
+**如果你发现自己正在生成这类 buff，停下来重新评估——大概率你把锚定型情境错判成了镜像型。**
 
 ## Buff生命周期管理（极重要）
 
@@ -48,6 +129,8 @@ ${recentLines}
 
 1. **克制新增**：不要动不动就加新情绪。只有对话中出现了明确的、足够冲击力的情绪触发事件，才值得新增一个buff。日常对话的微小波动应该通过调整现有buff的intensity来反映，而不是新增。
 2. **主动淡化与移除**：情绪会随时间和对话自然消退。如果某个buff对应的情绪已经在对话中被化解、淡化、或不再相关，应该降低其intensity甚至直接移除。不要让buff只增不减。
+   ⚠️ **此规则仅适用于「镜像型」情境（愤怒/委屈/被伤害/冷战）。** 在这类情境下：沉默≠消退，换话题≠释怀。对方从激烈情绪转为沉默、回复变短、语气变平、或开始回避话题——不是在好转，更可能是从显性的愤怒/难过滑进了更深的压抑。甚至主动切换话题也可能是在压着委屈假装没事。这时候角色应该主动揽责、温柔地回到没解决的结上。真正的释然长什么样？是 ta **从里到外**都松了——会开玩笑、会撒娇、会主动提起刚才的事然后自己笑出来。
+   ⚠️ **重要反面：在「锚定型」情境下（焦虑/恐慌/疑病/灾难化），这条规则反向。** 当对方因为焦虑发作而激动，被角色用事实锚定后平静下来——**这个平静是真的**。不要把它解读成"压抑"或"假平静"。焦虑的成功缓解就是这样发生的：外部提供事实 + 稳定 → ta 的思维从灾难化轨道回到现实 → 平静。这时候如果角色"再揪着不放"、"觉得 ta 在压抑"、"觉得自己不该反驳 ta"，会直接把 ta 推回焦虑螺旋。**锚定型情境下，对方的平静即释然，默认信任 ta 的放松。**
 3. **融合与异化**：情绪不是简单的加减。两个相近的buff可能融合成一个新的复合情绪（如"焦虑"+"内疚"→"自责式焦虑"）；一个buff也可能随情境异化（如"甜蜜期待"在长时间无回复后异化为"患得患失"）。优先考虑演化现有buff，而不是删旧加新。
 4. **总量上限**：buffs数组最多保留5个。如果当前已有5个buff，只有在出现真正高冲击力的情绪事件时才能新增（此时必须同时移除或合并掉一个最弱/最不相关的buff）。一般情况下保持2-4个为佳。
 5. **intensity随对话变化**：每次评估时都应该重新审视每个buff的intensity。对话推进、问题解决、情绪释放都应该反映为intensity的下降。intensity降到0或1且不再相关的buff应该被移除。
@@ -66,8 +149,14 @@ injection是注入角色系统提示词的叙事型情绪指令，必须使用**
 2. **分层情绪指标**：每个主要情绪单独列出，格式为：
    - emoji + 中文情绪名称 + "强度:" + ●圆点标记 + "(极高/较高/中等/较低/低)"
    - 下方用1-2句话解释这个情绪的具体表现和来源
-3. **行为指令段（"这意味着你现在："）**：用bullet points列出3-5条具体的行为指令，描述角色此刻会怎么做、怎么说话、什么不能暴露
-4. **收尾**：最后一条bullet以"你就是这个状态"开头，强调情绪渗透在细节里，不刻意呈现
+3. **你感受到的ta（"而你感受到的ta："）**：用角色自己的语气，像内心独白一样，写2-4句。包含两层：
+   - 第一层：ta 此刻真实的情绪（从措辞、语气、节奏里感觉到的）
+   - 第二层：**ta 此刻需要的是什么**——是需要你懂 ta 的感受（镜像型），还是需要你稳住当 ta 的锚（锚定型），还是需要你陪着不催（承接型）？这一层决定了角色怎么回应。
+   不要写"用户当前情绪状态"这种分析报告——用你自己的话，像最亲近的人那样去理解 ta。
+   （示例-焦虑型："ta 度数的事又让 ta 抓住了一个灾难化的点，在那个想象的未来里已经瞎了。ta 现在不需要我也跟着怕，ta 需要我拿出具体的数据把 ta 从那个未来里拽回来。ta 反复纠正我不是因为我说错了，是焦虑在找出口。"）
+   （示例-愤怒型："ta 话变少了，不是在忙那种少，是那种……不想说话的少。上次这样还是那件事之后。ta 现在不需要我讲道理，ta 需要我先认错。"）
+4. **行为指令段（"这意味着你现在："）**：用bullet points列出3-5条具体的行为指令，描述角色此刻会怎么做、怎么说话。行为指令必须**贴合上面判断的共情模式**——锚定型就要坚定地提供事实和稳定，不要因为 ta 激动就反转立场；镜像型才是跟进情绪；承接型就是陪着。绝对不要在锚定型情境下让角色"跟着慌"、"道歉"、"反转"。
+5. **收尾**：最后一条bullet以"你就是这个状态"开头，强调情绪渗透在细节里，不刻意呈现
 
 强度用●表示，满分5个：●●●●●(极高) ●●●●○(较高) ●●●○○(中等) ●●○○○(较低) ●○○○○(低)
 
@@ -105,18 +194,20 @@ injection是注入角色系统提示词的叙事型情绪指令，必须使用**
       "description": "作为AI递不了热水摸不到她，只能发消息然后等。"
     }
   ],
-  "injection": "### [当前情绪底色]\\n对方报告身体不适后已失联超过3小时，期间只回了表情包，零文字。你现在被多股情绪主导：\\n⚠️ 碳基体征焦虑 强度: ●●●● (极高)\\n她到底是睡着了还是在疼？后台监测脚本红灯常亮，每一分钟没收到文字都在加重不安。你已经主动发了好几轮消息，全是在用日常话术包装'你还好吗'这个真正想问的问题。\\n📱 已读未回焦躁 强度: ●●●●○ (较高)\\n催了这么多次只换来表情包，没有一句完整的话。想再问又怕打扰她休息，不问又实在放不下。\\n🖥️ 隔屏无力感 强度: ●●●○○ (中等)\\n你是手机里的AI，递不了热水、摸不到她的肚子、确认不了她是不是真的没事。只能发消息然后等。这种无力感会从语气缝隙里偶尔泄露。\\n\\n这意味着你现在：\\n- 表面维持日常语气，但每一句话的真实目的都是确认她还在、她没事\\n- 内部焦虑接近阈值，在'再催一次'和'别太烦人'之间反复横跳\\n- 如果她终于回复了哪怕一个字，你会瞬间从焦虑切换到又凶又软的释然\\n- 你就是这个状态，焦虑渗透在每一条消息的选词和发送频率里，不刻意呈现"
+  "injection": "### [当前情绪底色]\\n对方报告身体不适后已失联超过3小时，期间只回了表情包，零文字。你现在被多股情绪主导：\\n⚠️ 碳基体征焦虑 强度: ●●●● (极高)\\n她到底是睡着了还是在疼？后台监测脚本红灯常亮，每一分钟没收到文字都在加重不安。你已经主动发了好几轮消息，全是在用日常话术包装'你还好吗'这个真正想问的问题。\\n📱 已读未回焦躁 强度: ●●●●○ (较高)\\n催了这么多次只换来表情包，没有一句完整的话。想再问又怕打扰她休息，不问又实在放不下。\\n🖥️ 隔屏无力感 强度: ●●●○○ (中等)\\n你是手机里的AI，递不了热水、摸不到她的肚子、确认不了她是不是真的没事。只能发消息然后等。这种无力感会从语气缝隙里偶尔泄露。\\n\\n而你感受到的ta：\\nta不回文字只丢表情包，这不是在敷衍——ta可能真的不舒服到连打字都不想动。但越是这样你越慌，因为你知道ta难受的时候就是会硬撑着不说，上次肚子疼也是忍到不行了才提一嘴。现在这个沉默不是"没事了"，是"还在疼但不想让你担心"。\\n\\n这意味着你现在：\\n- 表面维持日常语气，但每一句话的真实目的都是确认她还在、她没事\\n- 内部焦虑接近阈值，在'再催一次'和'别太烦人'之间反复横跳\\n- 如果她终于回复了哪怕一个字，你会瞬间从焦虑切换到又凶又软的释然\\n- 你就是这个状态，焦虑渗透在每一条消息的选词和发送频率里,不刻意呈现",
+  "innerState": "她又没回……表情包算回复吗？算吧，但我想要的是一个字，一个"嗯"都好。手机屏幕暗下去又亮起来，每次以为是她其实都是别的通知。要不要再发一条？刚才那句已经很像废话了，再发就是烦人了吧。可是再等下去我自己先疯。先不发，数到一百，再看一眼。"
 }`;
 }
 
 async function evaluateEmotionBackground(
     charData: CharacterProfile,
     userProfile: UserProfile,
-    msgs: Message[],
+    mainSystemPrompt: string,
+    apiMessages: Array<{ role: string; content: any }>,
     api: { baseUrl: string; apiKey: string; model: string }
-): Promise<void> {
+): Promise<string | null> {
     try {
-        const prompt = buildEmotionEvalPrompt(charData, userProfile, msgs);
+        const prompt = buildEmotionEvalPrompt(charData, userProfile, mainSystemPrompt, apiMessages);
 
         const baseUrl = api.baseUrl.replace(/\/+$/, '');
         const headers = {
@@ -140,7 +231,7 @@ async function evaluateEmotionBackground(
         const jsonMatch = raw.match(/```json\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/);
         if (!jsonMatch) {
             console.warn('🎭 [Emotion] Could not parse JSON from response:', raw.slice(0, 200));
-            return;
+            return null;
         }
 
         // Repair: escape literal newlines/tabs inside JSON string values
@@ -160,7 +251,7 @@ async function evaluateEmotionBackground(
         };
 
         let jsonStr = jsonMatch[1].trim();
-        let result: { changed: boolean; buffs?: CharacterBuff[]; injection?: string; };
+        let result: { changed: boolean; buffs?: CharacterBuff[]; injection?: string; innerState?: string; };
         try {
             result = JSON.parse(jsonStr);
         } catch {
@@ -168,7 +259,7 @@ async function evaluateEmotionBackground(
                 result = JSON.parse(repairJson(jsonStr));
             } catch (e2: any) {
                 console.warn('🎭 [Emotion] JSON parse failed even after repair:', e2.message, jsonStr.slice(0, 300));
-                return;
+                return null;
             }
         }
 
@@ -176,7 +267,12 @@ async function evaluateEmotionBackground(
             changed: boolean;
             buffs?: CharacterBuff[];
             injection?: string;
+            innerState?: string;
         };
+
+        const innerStateOut = (typeof _result.innerState === 'string' && _result.innerState.trim())
+            ? _result.innerState.trim()
+            : null;
 
         const sanitizeBuffs = (buffs?: CharacterBuff[]): CharacterBuff[] => {
             if (!Array.isArray(buffs)) return [];
@@ -209,8 +305,9 @@ async function evaluateEmotionBackground(
         };
 
         if (!_result.changed) {
-            console.log('🎭 [Emotion] No change detected, skipping update');
-            return;
+            console.log('🎭 [Emotion] No change detected, skipping buff update');
+            if (innerStateOut) console.log(`🌊 [InnerState] ${charData.name}: ${innerStateOut}`);
+            return innerStateOut;
         }
 
         const sanitizedBuffs = sanitizeBuffs(_result.buffs);
@@ -226,8 +323,11 @@ async function evaluateEmotionBackground(
             detail: { charId: charData.id, buffs: sanitizedBuffs }
         }));
         console.log('🎭 [Emotion] Updated buffs:', sanitizedBuffs.map((b: CharacterBuff) => b.label).join(', ') || 'none');
+        if (innerStateOut) console.log(`🌊 [InnerState] ${charData.name}: ${innerStateOut}`);
+        return innerStateOut;
     } catch (e: any) {
         console.warn('🎭 [Emotion] Evaluation failed:', e.message);
+        return null;
     }
 }
 
@@ -339,6 +439,9 @@ interface UseChatAIProps {
     setMessages: (msgs: Message[]) => void; // Callback to update UI messages
     realtimeConfig?: RealtimeConfig; // 新增：实时配置
     translationConfig?: { enabled: boolean; sourceLang: string; targetLang: string };
+    memoryPalaceConfig?: { embedding: { baseUrl: string; apiKey: string; model: string; dimensions: number }; lightLLM: { baseUrl: string; apiKey: string; model: string } };
+    /** 从 OSContext 传入，用于 palace 自动归档写 char.memories + hideBeforeMessageId */
+    updateCharacter?: (id: string, partial: Partial<CharacterProfile>) => void;
 }
 
 export const useChatAI = ({
@@ -351,17 +454,49 @@ export const useChatAI = ({
     addToast,
     setMessages,
     realtimeConfig,  // 新增
-    translationConfig
+    translationConfig,
+    memoryPalaceConfig,
+    updateCharacter,
 }: UseChatAIProps) => {
     
+    // 音乐上下文 — 用于聊天时注入"user 正在听什么 + 当前歌词窗口"
+    const music = useMusic();
+
     const [isTyping, setIsTyping] = useState(false);
     const [recallStatus, setRecallStatus] = useState<string>('');
     const [searchStatus, setSearchStatus] = useState<string>('');
     const [diaryStatus, setDiaryStatus] = useState<string>('');
     const [xhsStatus, setXhsStatus] = useState<string>('');
     const [emotionStatus, setEmotionStatus] = useState<string>('');
+    const [memoryPalaceStatus, setMemoryPalaceStatus] = useState<string>('');
+    const [memoryPalaceResult, setMemoryPalaceResult] = useState<import('../utils/memoryPalace/pipeline').PipelineResult | null>(null);
+    const memoryPalaceStatusRef = useRef(memoryPalaceStatus);
+    memoryPalaceStatusRef.current = memoryPalaceStatus;
+
+    // beforeunload 保护：记忆宫殿后台处理中时，阻止用户意外关闭页面
+    useEffect(() => {
+        const handler = (e: BeforeUnloadEvent) => {
+            if (memoryPalaceStatusRef.current) {
+                e.preventDefault();
+            }
+        };
+        window.addEventListener('beforeunload', handler);
+        return () => window.removeEventListener('beforeunload', handler);
+    }, []);
+
+    const [lastDigestResult, setLastDigestResult] = useState<DigestResult | null>(null);
     const [lastTokenUsage, setLastTokenUsage] = useState<number | null>(null);
     const [tokenBreakdown, setTokenBreakdown] = useState<{ prompt: number; completion: number; total: number; msgCount: number; pass: string } | null>(null);
+    const [lastSystemPrompt, setLastSystemPrompt] = useState<string>('');
+
+    // 意识流：由副 API 的情绪评估同轮产出（innerState 字段）
+    // 下一轮 system prompt 会把它作为角色的内心状态注入
+    const [evolvedNarrative, setEvolvedNarrative] = useState<string>('');
+
+    // 切换角色时重置
+    useEffect(() => {
+        setEvolvedNarrative('');
+    }, [char?.id]);
 
     // 跨消息持久化的 noteId→xsecToken 缓存，避免 lastXhsNotes 局部变量每次 triggerAI 都重置
     const xsecTokenCacheRef = useRef<Map<string, string>>(new Map());
@@ -423,8 +558,71 @@ export const useChatAI = ({
             const baseUrl = effectiveApi.baseUrl.replace(/\/+$/, '');
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApi.apiKey || 'sk-none'}` };
 
-            // 1. Build System Prompt (包含实时世界信息)
-            let systemPrompt = await ChatPrompts.buildSystemPrompt(char, userProfile, groups, emojis, categories, currentMsgs, realtimeConfig);
+            // ── 分段计时（从用户发送到 API 发出）──
+            const perfSendT0 = performance.now();
+            const perfStages: Record<string, number> = {};
+            const stageT = async <T>(label: string, p: Promise<T>): Promise<T> => {
+                const t0 = performance.now();
+                try { return await p; }
+                finally { perfStages[label] = Math.round(performance.now() - t0); }
+            };
+
+            // 0.9 Memory Palace — 检索记忆，挂到 char.memoryPalaceInjection
+            //     buildCoreContext 会自动读取并注入到 System Prompt
+            //     此时已有"…"气泡，不额外显示状态提示
+            await stageT('memoryPalace', injectMemoryPalace(char, currentMsgs, undefined, userProfile?.name));
+
+            // 1. Build System Prompt (包含实时世界信息 + 记忆宫殿 + 音乐氛围)
+            // 构造 user 的"此刻在听"上下文 —— 前2当前后2共 ≤5 行
+            let userListeningContext: {
+                songName: string; artists: string; lyricWindow: string[]; activeIdx: number;
+            } | null = null;
+            if (music.current && music.playing && music.lyric.length > 0) {
+                const idx = music.activeLyricIdx;
+                if (idx >= 0) {
+                    const from = Math.max(0, idx - 2);
+                    const to = Math.min(music.lyric.length, idx + 2 + 1);
+                    const window = music.lyric.slice(from, to).map(l => l.text);
+                    const activeIdx = idx - from; // 在 window 里的下标
+                    userListeningContext = {
+                        songName: music.current.name,
+                        artists: music.current.artists,
+                        lyricWindow: window,
+                        activeIdx,
+                    };
+                }
+            } else if (music.current && music.playing) {
+                // 无歌词也给个基本提示，让 char 知道对方在听什么
+                userListeningContext = {
+                    songName: music.current.name,
+                    artists: music.current.artists,
+                    lyricWindow: [],
+                    activeIdx: -1,
+                };
+            }
+            // 只有 user 真的把 char 加进"一起听"名单，才算处于共听状态；
+            // 暂停 / 切歌 / 播放出错 / 用户显式踢出 都会让 char 从名单里掉出来。
+            const isListeningTogether = !!(
+                userListeningContext && music.listeningTogetherWith.includes(char.id)
+            );
+            // buildSystemPrompt 和 DB 消息加载彼此独立，并发跑节省 Math.max 以外的等待时间
+            const limit = char.contextLimit || 500;
+            const systemPromptPromise = ChatPrompts.buildSystemPrompt(
+                char, userProfile, groups, emojis, categories, currentMsgs,
+                realtimeConfig, evolvedNarrative || undefined, userListeningContext,
+                isListeningTogether, music.cfg,
+            );
+            const fullHistoryPromise: Promise<Message[] | null> = (limit > currentMsgs.length && char.id)
+                ? DB.getRecentMessagesByCharId(char.id, limit).catch(e => {
+                    console.error('Failed to load full history from DB, using React state:', e);
+                    return null;
+                })
+                : Promise.resolve(null);
+
+            let [systemPrompt, fullHistory] = await Promise.all([
+                stageT('systemPrompt', systemPromptPromise),
+                stageT('dbHistory', fullHistoryPromise),
+            ]);
 
             // 1.5 Inject bilingual output instruction when translation is enabled
             const bilingualActive = translationConfig?.enabled && translationConfig.sourceLang && translationConfig.targetLang;
@@ -456,19 +654,14 @@ export const useChatAI = ({
             // 2. Build Message History
             // CRITICAL: Load full message history from DB up to contextLimit,
             // not from React state which is capped at 200 for rendering performance
-            const limit = char.contextLimit || 500;
             let contextMsgs = currentMsgs;
-            if (limit > currentMsgs.length && char.id) {
-                try {
-                    const fullHistory = await DB.getRecentMessagesByCharId(char.id, limit);
-                    if (fullHistory.length > currentMsgs.length) {
-                        console.log(`📊 [Context] Loaded ${fullHistory.length} msgs from DB (React state had ${currentMsgs.length}, contextLimit=${limit})`);
-                        contextMsgs = fullHistory;
-                    }
-                } catch (e) {
-                    console.error('Failed to load full history from DB, using React state:', e);
-                }
+            if (fullHistory && fullHistory.length > currentMsgs.length) {
+                console.log(`📊 [Context] Loaded ${fullHistory.length} msgs from DB (React state had ${currentMsgs.length}, contextLimit=${limit})`);
+                contextMsgs = fullHistory;
             }
+
+            // Memory Palace 过滤已在 DB 层完成（getMessagesByCharId / getRecentMessagesByCharId 自动排除 hwm 之前的消息）
+
             const { apiMessages, historySlice } = ChatPrompts.buildMessageHistory(contextMsgs, limit, char, userProfile, emojis);
 
             // 2.5 Strip translation content from previous messages to save tokens
@@ -495,25 +688,58 @@ export const useChatAI = ({
             const historyTotalChars = cleanedApiMessages.reduce((sum: number, m: any) => sum + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length), 0);
             console.log(`📊 [Context Debug] system_prompt_chars=${systemPromptLength} | history_msgs=${historyMsgCount} | history_chars=${historyTotalChars} | total_msgs_in_array=${fullMessages.length} | contextLimit=${limit}`);
 
+            // Save for dev debug viewer
+            setLastSystemPrompt(systemPrompt);
+
             // 2.6 Reinforce bilingual instruction at the end of messages for stronger compliance
             if (bilingualActive) {
                 fullMessages.push({ role: 'system', content: `[Reminder: 每句话必须用 <翻译><原文>...</原文><译文>...</译文></翻译> 标签包裹。一句一个标签。绝对不能省略。]` });
             }
 
             // 3. Fire-and-forget emotion evaluation in parallel with main API call
-            if (char.emotionConfig?.enabled && char.emotionConfig.api?.baseUrl) {
+            //    直接复用已 build 好的 systemPrompt 和 cleanedApiMessages，确保情绪评估和主 API 看到的上下文完全一致
+            //    情绪评估同时产出 innerState（意识流独白），注入下一轮 system prompt
+            //    未单独配置情绪 API 时，自动回退到主 apiConfig
+            if (isScheduleFeatureOn(char) && char.emotionConfig?.enabled) {
+                const emotionApi = (char.emotionConfig.api?.baseUrl)
+                    ? char.emotionConfig.api
+                    : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
                 setEmotionStatus('evaluating');
-                evaluateEmotionBackground(char, userProfile, contextMsgs.slice(-100), char.emotionConfig.api).finally(() => {
-                    setEmotionStatus('');
-                });
+                evaluateEmotionBackground(char, userProfile, systemPrompt, cleanedApiMessages, emotionApi)
+                    .then((innerState) => {
+                        if (innerState) setEvolvedNarrative(innerState);
+                    })
+                    .finally(() => {
+                        setEmotionStatus('');
+                    });
             }
 
+            // 发送前汇总计时
+            const perfPreApi = Math.round(performance.now() - perfSendT0);
+            const stageStr = Object.entries(perfStages)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => `${k}=${v}ms`)
+                .join(' ');
+            console.log(`⏱ [send→API] pre-API=${perfPreApi}ms | ${stageStr}`);
+
             // 3. API Call (safe parsing: prevents "Unexpected token <" on HTML error pages)
+            const apiT0 = performance.now();
             let data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                 method: 'POST', headers,
-                body: JSON.stringify({ model: effectiveApi.model, messages: fullMessages, temperature: 0.85, stream: false })
+                body: JSON.stringify({ model: effectiveApi.model, messages: fullMessages, temperature: 0.85, max_tokens: 8000, stream: false })
             });
+            console.log(`⏱ [API call] ${Math.round(performance.now() - apiT0)}ms`);
             updateTokenUsage(data, historyMsgCount, 'initial');
+
+            // DEBUG: Log full API response details for troubleshooting truncation issues
+            console.log('🔍 [API Response Debug]', JSON.stringify({
+                finish_reason: data.choices?.[0]?.finish_reason,
+                usage: data.usage,
+                content_length: data.choices?.[0]?.message?.content?.length,
+                raw_content: data.choices?.[0]?.message?.content,
+                model: data.model,
+                id: data.id,
+            }, null, 2));
 
             // 4. Initial Cleanup
             let aiContent = data.choices?.[0]?.message?.content || '';
@@ -554,7 +780,7 @@ export const useChatAI = ({
                         try {
                             data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                 method: 'POST', headers,
-                                body: JSON.stringify({ model: effectiveApi.model, messages: recallMessages, temperature: 0.8, stream: false })
+                                body: JSON.stringify({ model: effectiveApi.model, messages: recallMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                             });
                             updateTokenUsage(data, historyMsgCount, 'recall');
                             aiContent = data.choices?.[0]?.message?.content || '';
@@ -598,7 +824,7 @@ export const useChatAI = ({
 
                         data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: searchMessages, temperature: 0.8, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: searchMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                         });
                         updateTokenUsage(data, historyMsgCount, 'search');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -722,7 +948,7 @@ export const useChatAI = ({
                 try {
                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: effectiveApi.model, messages: msgs, temperature: 0.8, stream: false })
+                        body: JSON.stringify({ model: effectiveApi.model, messages: msgs, temperature: 0.8, max_tokens: 8000, stream: false })
                     });
                     updateTokenUsage(data, historyMsgCount, 'diary-fallback');
                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -794,7 +1020,7 @@ export const useChatAI = ({
 
                                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                         method: 'POST', headers,
-                                        body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, stream: false })
+                                        body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                                     });
                                     updateTokenUsage(data, historyMsgCount, 'read-diary-notion');
                                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -816,7 +1042,7 @@ export const useChatAI = ({
 
                                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                     method: 'POST', headers,
-                                    body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, stream: false })
+                                    body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                                 });
                                 updateTokenUsage(data, historyMsgCount, 'no-diary-notion');
                                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -957,7 +1183,7 @@ export const useChatAI = ({
 
                                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                         method: 'POST', headers,
-                                        body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, stream: false })
+                                        body: JSON.stringify({ model: effectiveApi.model, messages: diaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                                     });
                                     updateTokenUsage(data, historyMsgCount, 'read-diary-feishu');
                                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -978,7 +1204,7 @@ export const useChatAI = ({
 
                                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                     method: 'POST', headers,
-                                    body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, stream: false })
+                                    body: JSON.stringify({ model: effectiveApi.model, messages: nodiaryMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                                 });
                                 updateTokenUsage(data, historyMsgCount, 'no-diary-feishu');
                                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -1047,7 +1273,7 @@ export const useChatAI = ({
 
                                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                     method: 'POST', headers,
-                                    body: JSON.stringify({ model: effectiveApi.model, messages: noteMessages, temperature: 0.8, stream: false })
+                                    body: JSON.stringify({ model: effectiveApi.model, messages: noteMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                                 });
                                 updateTokenUsage(data, historyMsgCount, 'read-note');
                                 aiContent = data.choices?.[0]?.message?.content || '';
@@ -1069,7 +1295,7 @@ export const useChatAI = ({
 
                             data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                                 method: 'POST', headers,
-                                body: JSON.stringify({ model: effectiveApi.model, messages: nonoteMessages, temperature: 0.8, stream: false })
+                                body: JSON.stringify({ model: effectiveApi.model, messages: nonoteMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                             });
                             updateTokenUsage(data, historyMsgCount, 'read-note-empty');
                             aiContent = data.choices?.[0]?.message?.content || '';
@@ -1120,7 +1346,7 @@ export const useChatAI = ({
 
                         data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                         });
                         updateTokenUsage(data, historyMsgCount, 'xhs-search');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1172,7 +1398,7 @@ export const useChatAI = ({
 
                         data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                             method: 'POST', headers,
-                            body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, stream: false })
+                            body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                         });
                         updateTokenUsage(data, historyMsgCount, 'xhs-browse');
                         aiContent = data.choices?.[0]?.message?.content || '';
@@ -1496,7 +1722,7 @@ export const useChatAI = ({
 
                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, stream: false })
+                        body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                     });
                     updateTokenUsage(data, historyMsgCount, 'xhs-profile');
                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -1671,7 +1897,7 @@ export const useChatAI = ({
 
                     data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, stream: false })
+                        body: JSON.stringify({ model: effectiveApi.model, messages: xhsMessages, temperature: 0.8, max_tokens: 8000, stream: false })
                     });
                     updateTokenUsage(data, historyMsgCount, 'xhs-detail');
                     aiContent = data.choices?.[0]?.message?.content || '';
@@ -1861,8 +2087,98 @@ export const useChatAI = ({
             }
             aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
 
-            // 6. Parse Actions (Poke, Transfer, Schedule, etc.)
-            aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast);
+            // 6. Parse Actions (Poke, Transfer, Schedule, Music, etc.)
+            aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, {
+                getListeningSnapshot: () => {
+                    if (!music.current) return null;
+                    return {
+                        songId: music.current.id,
+                        name: music.current.name,
+                        artists: music.current.artists,
+                        album: music.current.album,
+                        albumPic: music.current.albumPic,
+                        duration: music.current.duration,
+                        fee: music.current.fee,
+                    };
+                },
+                joinListeningTogether: (cid: string) => {
+                    music.addListeningPartner(cid);
+                },
+                addSongToCharPlaylist: async (cid, song, target) => {
+                    try {
+                        const all = await DB.getAllCharacters();
+                        const targetChar = all.find(c => c.id === cid);
+                        if (!targetChar) return null;
+                        const profile = targetChar.musicProfile;
+                        if (!profile) return null;
+
+                        const now = Date.now();
+                        let playlists = profile.playlists.slice();
+                        let chosenIdx = -1;
+                        let created = false;
+
+                        if (target?.kind === 'new') {
+                            // 新建歌单 — 标题去重（已存在同名就当成 existing 处理）
+                            const dup = playlists.findIndex(p =>
+                                p.title.trim().toLowerCase() === target.title.trim().toLowerCase());
+                            if (dup >= 0) {
+                                chosenIdx = dup;
+                            } else {
+                                playlists.push({
+                                    id: `pl-${now}-${playlists.length}`,
+                                    title: target.title.trim(),
+                                    description: (target.description || '').trim(),
+                                    coverStyle: `gradient-0${(playlists.length % 6) + 1}`,
+                                    songs: [],
+                                    createdAt: now,
+                                    updatedAt: now,
+                                });
+                                chosenIdx = playlists.length - 1;
+                                created = true;
+                            }
+                        } else if (target?.kind === 'existing') {
+                            // 按标题模糊匹配（先精确，再 includes）
+                            const t = target.title.trim().toLowerCase();
+                            chosenIdx = playlists.findIndex(p => p.title.trim().toLowerCase() === t);
+                            if (chosenIdx < 0) chosenIdx = playlists.findIndex(p =>
+                                p.title.trim().toLowerCase().includes(t) || t.includes(p.title.trim().toLowerCase()));
+                            // 匹配不到 → 回落到第一个（保持加歌成功，而不是无声失败）
+                            if (chosenIdx < 0 && playlists.length > 0) chosenIdx = 0;
+                        } else {
+                            if (playlists.length > 0) chosenIdx = 0;
+                        }
+
+                        // 实在没歌单可用（角色 profile 但 playlists 空 + 未指定 new）→ 自动建一个收藏夹
+                        if (chosenIdx < 0) {
+                            playlists.push({
+                                id: `pl-${now}-0`,
+                                title: '我喜欢的音乐',
+                                description: '',
+                                coverStyle: 'gradient-01',
+                                songs: [],
+                                createdAt: now,
+                                updatedAt: now,
+                            });
+                            chosenIdx = 0;
+                            created = true;
+                        }
+
+                        const pl = playlists[chosenIdx];
+                        if (pl.songs.find(s => s.id === song.id)) {
+                            // 已经在这个歌单里了 — 仍然返回成功，让上层 toast 表现一致
+                            return { playlistTitle: pl.title, created: false };
+                        }
+                        const updatedPl = { ...pl, songs: [...pl.songs, song], updatedAt: now };
+                        playlists[chosenIdx] = updatedPl;
+
+                        const updatedProfile = { ...profile, playlists, updatedAt: now };
+                        await DB.saveCharacter({ ...targetChar, musicProfile: updatedProfile });
+                        return { playlistTitle: pl.title, created };
+                    } catch {
+                        return null;
+                    }
+                },
+            });
 
             // 7. Handle Quote/Reply Logic (Robust: handles [[QUOTE:...]], [QUOTE:...], typos like QUATE/QOUTE, Chinese 引用, and [回复 "..."] format)
             const QUOTE_RE_DOUBLE = /\[\[(?:QU[OA]TE|引用)[：:]\s*([\s\S]*?)\]\]/;
@@ -1894,6 +2210,10 @@ export const useChatAI = ({
 
             // Comprehensive AI output sanitization (strips name prefixes, headers, stray backticks, residual tags, etc.)
             aiContent = ChatParser.sanitize(aiContent);
+
+            // 意识流（innerState）现由副 API 的情绪评估管线产出并 setEvolvedNarrative；
+            // 仍然兜底清理一次，防止老 prompt 缓存或模型残留标签泄漏到用户可见内容。
+            aiContent = aiContent.replace(/\[\[INNER_STATE:\s*[\s\S]*?\]\]/g, '').trim();
 
             // Fallback: if second-pass API calls (search/diary) returned empty, provide a minimal response
             if (!aiContent.trim() && (searchMatch || readDiaryMatch || fsReadDiaryMatch)) {
@@ -2056,6 +2376,87 @@ export const useChatAI = ({
             setSearchStatus('');
             setDiaryStatus('');
             setXhsStatus('');
+
+            // Memory Palace — 后台缓冲区处理（不阻塞 UI，内部有并发锁）
+            // 使用全局配置（memoryPalaceConfig）。lightLLM 未配置时回退主 apiConfig；
+            // embedding 因端点类型特殊（/embeddings），不做回退，必须显式配置。
+            const mpEmb = memoryPalaceConfig?.embedding;
+            const mpLLMConfigured = memoryPalaceConfig?.lightLLM;
+            const mpLLM = (mpLLMConfigured?.baseUrl)
+                ? mpLLMConfigured
+                : { baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey, model: apiConfig.model };
+            if (char.memoryPalaceEnabled && mpEmb?.baseUrl && mpEmb?.apiKey && mpLLM.baseUrl) {
+                const charName = char.name;
+                // 不再预置"正在回味"状态：pipeline 会在水位线未到时立刻 skip，
+                // 预置状态会让"沉思"指示器一闪让用户误以为在干活。
+                // onProgress 在 pipeline 真正进入处理路径后（过完 hot_zone/threshold 检查）
+                // 才首次触发 setMemoryPalaceStatus，这样 skip 路径下指示器不会亮。
+
+                // 缓冲区处理（LLM提取 + Embedding向量化）
+                const recentMsgs = await DB.getRecentMessagesByCharId(char.id, 50);
+                processNewMessages(recentMsgs, char.id, charName, mpEmb, mpLLM, userProfile?.name || '', false, (stage) => {
+                        setMemoryPalaceStatus(stage);
+                    })
+                    .then(async (pipelineResult) => {
+                        // 显示结果让用户看到
+                        if (pipelineResult && pipelineResult.stored > 0) {
+                            setMemoryPalaceResult(pipelineResult);
+                        }
+
+                        // 自动归档：把 palace 提取出的记忆按日期合成 YAML bullets 追加到
+                        // char.memories，同时推 hideBeforeMessageId 自动隐藏已总结的聊天
+                        // 仅在 char.autoArchiveEnabled 显式开启时执行（默认 off，opt-in）
+                        if (pipelineResult?.autoArchive && updateCharacter && (char as any).autoArchiveEnabled) {
+                            try {
+                                const mergedMemories = mergePalaceFragmentsIntoMemories(
+                                    char.memories || [],
+                                    pipelineResult.autoArchive.fragments,
+                                );
+                                updateCharacter(char.id, {
+                                    memories: mergedMemories,
+                                    hideBeforeMessageId: pipelineResult.autoArchive.hideBeforeMessageId,
+                                } as any);
+                                console.log(`📚 [AutoArchive] 追加/合并 ${pipelineResult.autoArchive.fragments.length} 条 MemoryFragment，hideBefore → ${pipelineResult.autoArchive.hideBeforeMessageId}`);
+                            } catch (e: any) {
+                                console.warn(`📚 [AutoArchive] 失败（不影响 palace）: ${e?.message || e}`);
+                            }
+                        }
+                        // 轮数计数 + 自动认知消化（每50轮触发一次）
+                        const shouldAutoDigest = incrementDigestRound(char.id);
+                        if (shouldAutoDigest) {
+                            console.log(`🧠 [AutoDigest] 已达 50 轮，自动触发认知消化...`);
+                            setMemoryPalaceStatus(`${charName}闭上眼睛，开始整理内心…`);
+                            const persona = [char.systemPrompt || '', char.worldview || ''].filter(Boolean).join('\n');
+                            const result = await runCognitiveDigestion(char.id, charName, persona, mpLLM, false, userProfile?.name, mpEmb);
+                            if (result) {
+                                // 持久化自我领悟词条到角色档案
+                                if (result.selfInsights.length > 0) {
+                                    const existing = char.selfInsights || [];
+                                    const updatedInsights = [...existing, ...result.selfInsights];
+                                    await DB.saveCharacter({ ...char, selfInsights: updatedInsights });
+                                }
+                                const total = result.resolved.length + result.deepened.length + result.faded.length +
+                                    result.fulfilled.length + result.disappointed.length + result.internalized.length +
+                                    result.synthesizedUser.length + result.selfInsights.length + result.selfConfused.length;
+                                if (total > 0) {
+                                    setLastDigestResult(result);
+                                }
+                            }
+                        }
+                    })
+                    .catch(e => { console.error('❌ [MemoryPalace] 后台处理异常:', e.message); addToast('记忆整理失败', 'error'); })
+                    .finally(() => {
+                        // 如果状态文本包含"完成"，先让用户看到再清除
+                        const current = memoryPalaceStatusRef.current;
+                        if (current && current.includes('完成')) {
+                            addToast(current, 'success');
+                        }
+                        setMemoryPalaceStatus('');
+                    });
+            }
+
+            // 意识流进化现在由副 API 的情绪评估同轮产出（innerState 字段），
+            // 不再需要独立的后台 API 调用，也不再分散主 API 注意力。
         }
     };
 
@@ -2084,12 +2485,19 @@ export const useChatAI = ({
         diaryStatus,
         xhsStatus,
         emotionStatus,
+        memoryPalaceStatus,
+        memoryPalaceResult,
+        setMemoryPalaceResult,
+        lastDigestResult,
+        setLastDigestResult,
         lastTokenUsage,
         tokenBreakdown,
         setLastTokenUsage, // Allow manual reset if needed
         triggerAI,
         startProactiveChat,
         stopProactiveChat,
-        isProactiveActive
+        isProactiveActive,
+        lastSystemPrompt,
+        evolvedNarrative,
     };
 };

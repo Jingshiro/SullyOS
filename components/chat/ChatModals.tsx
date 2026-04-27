@@ -1,7 +1,9 @@
 
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
-import { CharacterProfile, Message, EmojiCategory } from '../../types';
+import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
+import ScheduleCard from '../schedule/ScheduleCard';
+import EmotionSettingsPanel from './EmotionSettingsPanel';
 
 interface ChatModalsProps {
     modalType: string;
@@ -32,6 +34,7 @@ interface ChatModalsProps {
     editingPrompt: {id: string, name: string, content: string} | null;
     setEditingPrompt: (p: any) => void;
     isSummarizing: boolean;
+    archiveProgress?: string;
 
     // Selection Props
     selectedMessage: Message | null;
@@ -83,6 +86,26 @@ interface ChatModalsProps {
     // Voice generation from long-press
     onGenerateVoice?: () => void;
     voiceAvailable?: boolean; // true if char has voiceProfile configured
+    // Schedule
+    scheduleData?: DailySchedule | null;
+    isScheduleGenerating?: boolean;
+    onScheduleEdit?: (index: number, slot: ScheduleSlot) => void;
+    onScheduleDelete?: (index: number) => void;
+    onScheduleReroll?: () => void;
+    onScheduleCoverChange?: (dataUrl: string) => void;
+    onScheduleStyleChange?: (style: 'lifestyle' | 'mindful') => void;
+    // Schedule master toggle
+    isScheduleFeatureEnabled?: boolean;
+    onToggleScheduleFeature?: () => void;
+    // Memory Palace force vectorize
+    isMemoryPalaceEnabled?: boolean;
+    isVectorizing?: boolean;
+    onForceVectorize?: () => void;
+    // Emotion (embedded under schedule modal, synced on/off with scheduleStyle)
+    apiPresets?: ApiPreset[];
+    onAddApiPreset?: (name: string, config: APIConfig) => void;
+    onSaveEmotion?: (config: NonNullable<CharacterProfile['emotionConfig']>) => void;
+    onClearBuffs?: () => void;
 }
 
 const ChatModals: React.FC<ChatModalsProps> = ({
@@ -95,7 +118,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     editContent, setEditContent,
     newCategoryName, setNewCategoryName, onAddCategory,
     archivePrompts, selectedPromptId, setSelectedPromptId,
-    editingPrompt, setEditingPrompt, isSummarizing,
+    editingPrompt, setEditingPrompt, isSummarizing, archiveProgress,
     selectedMessage, selectedEmoji, selectedCategory, activeCharacter, messages,
     allHistoryMessages = [],
     onTransfer, onImportEmoji, onSaveSettings,
@@ -106,7 +129,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     translationEnabled, onToggleTranslation, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     xhsEnabled, onToggleXhs,
     chatVoiceEnabled, onToggleChatVoice, chatVoiceLang, onSetChatVoiceLang,
-    onGenerateVoice, voiceAvailable
+    onGenerateVoice, voiceAvailable,
+    scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
+    onScheduleStyleChange,
+    isScheduleFeatureEnabled, onToggleScheduleFeature,
+    isMemoryPalaceEnabled, isVectorizing, onForceVectorize,
+    apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs,
 }) => {
     const bgInputRef = useRef<HTMLInputElement>(null);
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
@@ -298,6 +326,23 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                          <p className="text-[10px] text-slate-400 mt-2 text-center">可选择从某条消息开始显示，隐藏之前的记录（不被 AI 读取）。</p>
                      </div>
                      
+                     {/* 记忆宫殿：一键向量化所有聊天记录 */}
+                     {isMemoryPalaceEnabled && onForceVectorize && (
+                         <div className="pt-2 border-t border-slate-100">
+                             <button
+                                 onClick={onForceVectorize}
+                                 disabled={isVectorizing}
+                                 className="w-full py-3 bg-emerald-50 text-emerald-600 font-bold rounded-2xl border border-emerald-200 active:scale-95 transition-transform flex items-center justify-center gap-2"
+                             >
+                                 {isVectorizing ? '🏰 向量化处理中...' : '🏰 一键向量化所有聊天记录'}
+                             </button>
+                             <p className="text-[10px] text-slate-400 mt-2 text-center leading-relaxed">
+                                 将所有未处理的聊天记录交给记忆宫殿向量化，完成后可安全清空聊天。<br/>
+                                 <span className="text-slate-300">看不懂这是什么的话不需要操作此按钮。</span>
+                             </p>
+                         </div>
+                     )}
+
                      <div className="pt-2 border-t border-slate-100">
                          <label className="text-xs font-bold text-red-400 uppercase mb-3 block">危险区域 (Danger Zone)</label>
                          <div className="flex items-center gap-2 mb-3 cursor-pointer" onClick={() => setPreserveContext(!preserveContext)}>
@@ -314,14 +359,54 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             </Modal>
 
             {/* Archive Settings Modal */}
-            <Modal isOpen={modalType === 'archive-settings'} title="记忆归档设置" onClose={() => setModalType('none')} footer={<button onClick={onArchive} disabled={isSummarizing} className="w-full py-3 bg-indigo-500 text-white font-bold rounded-2xl shadow-lg shadow-indigo-200">开始归档</button>}>
+            <Modal isOpen={modalType === 'archive-settings'} title="记忆归档设置" onClose={() => { if (!isSummarizing) setModalType('none'); }} footer={
+                isSummarizing ?
+                <div className="w-full py-3 bg-slate-100 text-indigo-600 font-bold rounded-2xl text-center flex items-center justify-center gap-2"><div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>{archiveProgress || '归档中...'}</div> :
+                <button onClick={onArchive} disabled={isSummarizing} className="w-full py-3 bg-indigo-500 text-white font-bold rounded-2xl shadow-lg shadow-indigo-200">开始归档</button>
+            }>
                 <div className="space-y-4">
+                    {(() => {
+                        const palaceOn = !!(activeCharacter as any).memoryPalaceEnabled;
+                        const autoOn = !!(activeCharacter as any).autoArchiveEnabled;
+                        const activePrompt = archivePrompts.find(p => p.id === selectedPromptId);
+                        const activeName = activePrompt?.name || '理性精炼 (Rational)';
+                        if (palaceOn && autoOn) {
+                            return (
+                                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-800 leading-relaxed">
+                                    ✅ <b>自动归档已开启</b>。palace 处理后系统会按日期自动把聊天归档到"本月日度总结"。<br/>
+                                    自动归档走的是 <b>记忆宫殿内置风格</b>（保证向量检索质量稳定），
+                                    下方模板<b>只对这里的"开始归档"按钮生效</b>——你在这换风格不会影响自动归档。
+                                </div>
+                            );
+                        }
+                        if (palaceOn && !autoOn) {
+                            return (
+                                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 leading-relaxed">
+                                    ⚠️ 记忆宫殿已开，但 <b>自动归档没开</b>——palace 只在后台做向量索引，
+                                    <b>不</b>会自动写到"本月日度总结"里。<br/>
+                                    想让它自动写 → 神经链接 → 角色 → 记忆宫殿开关下面的 <b>"📚 自动归档"</b>；
+                                    或者继续用下方按钮手动按当前选中的 <b>「{activeName}」</b> 风格跑。
+                                </div>
+                            );
+                        }
+                        return (
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-700 leading-relaxed">
+                                📋 <b>纯手动模式</b>（没开记忆宫殿）。下方按钮会用选中的
+                                <b className="text-slate-900"> 「{activeName}」</b> 风格把聊天按天总结到"本月日度总结"。
+                                归档完会自动隐藏已总结的旧消息（保留最近一部分可见）。
+                            </div>
+                        );
+                    })()}
                     <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
                         <label className="text-[10px] font-bold text-indigo-400 uppercase mb-2 block">选择提示词模板</label>
                         <div className="flex flex-col gap-2">
-                            {archivePrompts.map(p => (
-                                <div key={p.id} onClick={() => setSelectedPromptId(p.id)} className={`p-3 rounded-lg border cursor-pointer flex items-center justify-between ${selectedPromptId === p.id ? 'bg-white border-indigo-500 shadow-sm ring-1 ring-indigo-500' : 'bg-white/50 border-indigo-200 hover:bg-white'}`}>
-                                    <span className={`text-xs font-bold ${selectedPromptId === p.id ? 'text-indigo-700' : 'text-slate-600'}`}>{p.name}</span>
+                            {archivePrompts.map(p => {
+                                const isSelected = selectedPromptId === p.id;
+                                return (
+                                <div key={p.id} onClick={() => setSelectedPromptId(p.id)} className={`p-3 rounded-lg border cursor-pointer flex items-center justify-between ${isSelected ? 'bg-white border-indigo-500 shadow-sm ring-1 ring-indigo-500' : 'bg-white/50 border-indigo-200 hover:bg-white'}`}>
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <span className={`text-xs font-bold ${isSelected ? 'text-indigo-700' : 'text-slate-600'}`}>{p.name}</span>
+                                    </div>
                                     <div className="flex gap-2">
                                         <button onClick={(e) => { e.stopPropagation(); setSelectedPromptId(p.id); onEditPrompt(); }} className="text-[10px] text-slate-400 hover:text-indigo-500 px-2 py-1 rounded bg-slate-100 hover:bg-indigo-50">编辑/查看</button>
                                         {!p.id.startsWith('preset_') && (
@@ -329,7 +414,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         )}
                                     </div>
                                 </div>
-                            ))}
+                                );
+                            })}
                         </div>
                         <button onClick={onCreatePrompt} className="mt-3 w-full py-2 text-xs font-bold text-indigo-500 border border-dashed border-indigo-300 rounded-lg hover:bg-indigo-100">+ 新建自定义提示词</button>
                     </div>
@@ -366,10 +452,17 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             >
                 <div className="space-y-2 max-h-[50vh] overflow-y-auto no-scrollbar p-1">
                     <p className="text-xs text-slate-400 text-center mb-2">点击某条消息，将其设为"新的起点"。此条之前的消息将被隐藏且不发送给 AI。</p>
+                    {typeof activeCharacter.hideBeforeMessageId === 'number' && activeCharacter.hideBeforeMessageId > 0 && (
+                        <div className="bg-violet-50 border border-violet-200 rounded-xl p-2.5 text-[11px] text-violet-800 leading-relaxed mb-2">
+                            <b>💡 已经有隐藏起点了</b>：灰色消息是自动/手动归档时标记为"已总结"的，AI 现在看不到原文，但能看到它们的总结。<br/>
+                            <span className="text-violet-600">记忆宫殿向量记忆有自己的水位线（和这里无关），不用手动管。</span>
+                        </div>
+                    )}
                     {(() => {
                         const reversed = allHistoryMessages.slice().reverse();
                         const totalPages = Math.max(1, Math.ceil(reversed.length / HISTORY_PAGE_SIZE));
                         const pageMessages = reversed.slice(historyPage * HISTORY_PAGE_SIZE, (historyPage + 1) * HISTORY_PAGE_SIZE);
+                        const hideCut = activeCharacter.hideBeforeMessageId;
                         return (<>
                             {reversed.length > HISTORY_PAGE_SIZE && (
                                 <div className="flex items-center justify-between px-1 py-1">
@@ -378,16 +471,26 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                     <button onClick={() => setHistoryPage(p => Math.min(totalPages - 1, p + 1))} disabled={historyPage >= totalPages - 1} className={`px-3 py-1 text-xs rounded-lg ${historyPage >= totalPages - 1 ? 'text-slate-300' : 'text-primary hover:bg-primary/10'}`}>下一页</button>
                                 </div>
                             )}
-                            {pageMessages.map(m => (
-                                <div key={m.id} onClick={() => onSetHistoryStart(m.id)} className={`p-3 rounded-xl border cursor-pointer text-xs flex gap-2 items-start ${activeCharacter.hideBeforeMessageId === m.id ? 'bg-primary/10 border-primary ring-1 ring-primary' : 'bg-white border-slate-100 hover:bg-slate-50'}`}>
-                                    <span className="text-slate-400 font-mono whitespace-nowrap pt-0.5">[{new Date(m.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}]</span>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="font-bold text-slate-600 mb-0.5">{m.role === 'user' ? '我' : activeCharacter.name}</div>
-                                        <div className="text-slate-500 truncate">{m.content}</div>
+                            {pageMessages.map(m => {
+                                const isCurrentStart = hideCut === m.id;
+                                const isHidden = !!(hideCut && m.id < hideCut);
+                                const cls = isCurrentStart
+                                    ? 'bg-primary/10 border-primary ring-1 ring-primary'
+                                    : isHidden
+                                        ? 'bg-slate-50 border-slate-100 opacity-55'
+                                        : 'bg-white border-slate-100 hover:bg-slate-50';
+                                return (
+                                    <div key={m.id} onClick={() => onSetHistoryStart(m.id)} className={`p-3 rounded-xl border cursor-pointer text-xs flex gap-2 items-start ${cls}`}>
+                                        <span className="text-slate-400 font-mono whitespace-nowrap pt-0.5">[{new Date(m.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}]</span>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="font-bold text-slate-600 mb-0.5">{m.role === 'user' ? '我' : activeCharacter.name}</div>
+                                            <div className={isHidden ? 'text-slate-400 truncate line-through decoration-slate-300/70' : 'text-slate-500 truncate'}>{m.content}</div>
+                                        </div>
+                                        {isCurrentStart && <span className="text-primary font-bold text-[10px] bg-white px-2 rounded-full border border-primary/20">起点</span>}
+                                        {!isCurrentStart && isHidden && <span className="text-slate-400 font-bold text-[10px] bg-white px-2 rounded-full border border-slate-200">已隐</span>}
                                     </div>
-                                    {activeCharacter.hideBeforeMessageId === m.id && <span className="text-primary font-bold text-[10px] bg-white px-2 rounded-full border border-primary/20">起点</span>}
-                                </div>
-                            ))}
+                                );
+                            })}
                             {reversed.length > HISTORY_PAGE_SIZE && (
                                 <div className="flex items-center justify-center px-1 pt-2">
                                     <span className="text-xs text-slate-400">{historyPage + 1} / {totalPages}</span>
@@ -509,11 +612,110 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 isOpen={modalType === 'edit-message'} title="编辑内容" onClose={() => setModalType('none')}
                 footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onConfirmEditMessage} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
             >
-                <textarea 
-                    value={editContent} 
-                    onChange={e => setEditContent(e.target.value)} 
-                    className="w-full h-32 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed" 
+                <textarea
+                    value={editContent}
+                    onChange={e => setEditContent(e.target.value)}
+                    className="w-full h-32 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed"
                 />
+            </Modal>
+
+            {/* Schedule Modal */}
+            <Modal
+                isOpen={modalType === 'schedule'} title={`${activeCharacter?.name || '角色'}の日程`} onClose={() => setModalType('none')}
+            >
+                <div className="max-h-[70vh] overflow-y-auto -mx-2 px-2">
+                    {/* 总开关：关闭时不调副 API、不生成日程、不注入情绪 buff */}
+                    {onToggleScheduleFeature && (
+                        <div className="mb-4 bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1 min-w-0 pr-3">
+                                    <p className="text-xs font-bold text-slate-700">日程与情绪 Buff</p>
+                                    <p className="text-[10px] text-slate-500 leading-relaxed mt-0.5">
+                                        {isScheduleFeatureEnabled
+                                            ? '已开启：会调用副 API 生成今日日程，并在对话中评估情绪 buff。'
+                                            : '已关闭：不调副 API，不生成日程，不注入情绪 buff。'}
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={onToggleScheduleFeature}
+                                    aria-label="切换日程与情绪总开关"
+                                    className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center flex-shrink-0 ${isScheduleFeatureEnabled ? 'bg-primary' : 'bg-slate-300'}`}
+                                >
+                                    <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${isScheduleFeatureEnabled ? 'translate-x-4' : ''}`}></div>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {isScheduleFeatureEnabled && (
+                        <>
+                            {/* Schedule Style Selector */}
+                            {onScheduleStyleChange && (
+                                <div className="mb-4">
+                                    {!activeCharacter?.scheduleStyle && (
+                                        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 mb-3">
+                                            <p className="text-xs text-amber-700 font-bold mb-1">请选择日程风格</p>
+                                            <p className="text-[11px] text-amber-600 leading-relaxed">
+                                                不同风格会影响角色的内心独白生成方式。选择后会自动重新生成今日日程。
+                                            </p>
+                                        </div>
+                                    )}
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => onScheduleStyleChange('lifestyle')}
+                                            disabled={isScheduleGenerating}
+                                            className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all border ${
+                                                (activeCharacter?.scheduleStyle || 'lifestyle') === 'lifestyle'
+                                                    ? 'bg-violet-100 border-violet-300 text-violet-700'
+                                                    : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'
+                                            }`}
+                                        >
+                                            <span className="block text-sm mb-0.5">生活系</span>
+                                            <span className="block text-[10px] opacity-70 font-normal">虚构日常 · 跑步做饭逛街</span>
+                                        </button>
+                                        <button
+                                            onClick={() => onScheduleStyleChange('mindful')}
+                                            disabled={isScheduleGenerating}
+                                            className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all border ${
+                                                activeCharacter?.scheduleStyle === 'mindful'
+                                                    ? 'bg-teal-100 border-teal-300 text-teal-700'
+                                                    : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'
+                                            }`}
+                                        >
+                                            <span className="block text-sm mb-0.5">意识系</span>
+                                            <span className="block text-[10px] opacity-70 font-normal">真实内心 · 不虚构不说谎</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            <ScheduleCard
+                                schedule={scheduleData || null}
+                                character={activeCharacter}
+                                compact={false}
+                                onEdit={onScheduleEdit}
+                                onDelete={onScheduleDelete}
+                                onReroll={onScheduleReroll}
+                                onCoverImageChange={onScheduleCoverChange}
+                                isGenerating={isScheduleGenerating}
+                            />
+                            <p className="text-[10px] text-slate-400 text-center mt-3 leading-relaxed">
+                                点击日程项可编辑 · 长按可删除
+                            </p>
+
+                            {/* 情绪 / 意识流 API — 与日程强制同步 */}
+                            {activeCharacter && apiPresets && onAddApiPreset && onSaveEmotion && onClearBuffs && (
+                                <EmotionSettingsPanel
+                                    char={activeCharacter}
+                                    apiPresets={apiPresets}
+                                    addApiPreset={onAddApiPreset}
+                                    onSave={onSaveEmotion}
+                                    onClearBuffs={onClearBuffs}
+                                />
+                            )}
+                        </>
+                    )}
+                </div>
             </Modal>
         </>
     );

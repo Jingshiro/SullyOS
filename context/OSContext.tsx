@@ -1,12 +1,13 @@
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
 import { DB } from '../utils/db';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { normalizeCharacterImpression } from '../utils/impression';
+import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 
@@ -90,6 +91,37 @@ const defaultRealtimeConfig: RealtimeConfig = {
   cacheMinutes: 30
 };
 
+// 记忆宫殿全局配置（所有角色共用 embedding、副 LLM 和 rerank）
+export interface MemoryPalaceGlobalConfig {
+  embedding: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    dimensions: number;
+  };
+  lightLLM: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+  };
+  // Rerank 模型配置（可选增强，接 cross-encoder rerank API）
+  // 遵循 Cohere/Jina/SiliconFlow 通用协议：POST {baseUrl}/rerank
+  // { model, query, documents, top_n } → { results: [{index, relevance_score}] }
+  rerank: {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    topN: number; // 额外召回条数（去重后追加到主 15 条后面）
+  };
+}
+
+const defaultMemoryPalaceConfig: MemoryPalaceGlobalConfig = {
+  embedding: { baseUrl: '', apiKey: '', model: 'BAAI/bge-m3', dimensions: 1024 },
+  lightLLM: { baseUrl: '', apiKey: '', model: '' },
+  rerank: { enabled: false, baseUrl: '', apiKey: '', model: 'BAAI/bge-reranker-v2-m3', topN: 5 },
+};
+
 interface OSContextType {
   activeApp: AppID;
   openApp: (appId: AppID) => void;
@@ -149,6 +181,14 @@ interface OSContextType {
   realtimeConfig: RealtimeConfig;
   updateRealtimeConfig: (updates: Partial<RealtimeConfig>) => void;
 
+  // 记忆宫殿全局配置（所有角色共用）
+  memoryPalaceConfig: MemoryPalaceGlobalConfig;
+  updateMemoryPalaceConfig: (updates: Partial<MemoryPalaceGlobalConfig>) => void;
+
+  // 远程向量存储配置 (Supabase pgvector)
+  remoteVectorConfig: import('../utils/memoryPalace/types').RemoteVectorConfig;
+  updateRemoteVectorConfig: (updates: Partial<import('../utils/memoryPalace/types').RemoteVectorConfig>) => void;
+
   customThemes: ChatTheme[];
   addCustomTheme: (theme: ChatTheme) => void;
   removeCustomTheme: (id: string) => void;
@@ -173,6 +213,13 @@ interface OSContextType {
   lastMsgTimestamp: number; // New: Signal for Chat to refresh
   unreadMessages: Record<string, number>; // New: Track unread counts per character
   clearUnread: (charId: string) => void; // New: Method to clear unread
+
+  // Cloud Backup
+  cloudBackupConfig: CloudBackupConfig;
+  updateCloudBackupConfig: (updates: Partial<CloudBackupConfig>) => void;
+  cloudBackupToWebDAV: (mode: 'text_only' | 'media_only' | 'full') => Promise<void>;
+  cloudRestoreFromWebDAV: (file: CloudBackupFile) => Promise<void>;
+  listCloudBackups: () => Promise<CloudBackupFile[]>;
 
   // System
   exportSystem: (mode: 'text_only' | 'media_only' | 'full') => Promise<Blob>;
@@ -205,10 +252,11 @@ const defaultTheme: OSTheme = {
 };
 
 const defaultApiConfig: APIConfig = {
-  baseUrl: '', 
+  baseUrl: '',
   apiKey: '',
   minimaxApiKey: '',
   minimaxGroupId: '',
+  minimaxRegion: 'domestic',
   model: 'gpt-4o-mini',
 };
 
@@ -286,7 +334,7 @@ Sully是小手机的内置AI。
       'sad': 'https://sharkpan.xyz/f/3WnMce/03.png',
       'angry': 'https://sharkpan.xyz/f/5n1xSj/04.png',
       'shy': 'https://sharkpan.xyz/f/kdwet6/05.png',
-      'chibi': 'https://sharkpan.xyz/f/oWZQF4/S2.png' // Default Room Sprite
+      'chibi': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADUAAAA4CAYAAABdeLCuAAAACXBIWXMAAA9hAAAPYQGoP6dpAAAAG3RFWHRTb2Z0d2FyZQBDZWxzeXMgU3R1ZGlvIFRvb2zBp+F8AAAEDElEQVRoge2aP0wUQRTGv60IsQIasRAtaCDQQAEkkFwIJAoW2FhhiBcKMBQmhEAhJlhoDB3xKC4Yg5WNFoImXC4kkoCFNBJoKAQbbYDyctVaXN4yOzuz82dn74zhq+525719v3k7b2Z3x/N9H/+bvCsoFxf0vMgFfd/3nF6jmlCe5/ntbR0AgMOjA+cwwXWSQol6XqZqAAEJoQiIgtXV4dGB8LgrUCsoWxiVWNgkgMZQ7LhIUwRoA6cNlVZ2VLIZf1pQ1cqOTKZgSigV0OHRQerZs4KKK8uqgF1A0fhRdZ4uWJAp24y4ypQKzDlU3AVd3n5xvmRzGyuCDo0pGVjaWUrqk89ipFCIwKoNBZhNHcZQqlsijcpn4lc01qRQA709+Lr3rSZQrG+KQ9ZGVDxiM6UKuhpQ/DFWsmpoBDXQ2wMAQc+JztM5vq1I1IaVzDcrVXlPNVOioHnF3VqA3bwlLem6s3yaKw7bbMVC6QRjm82kHeIEyjY4WcZdrRmV1c81VPCgVy7Bq6vX8ieyN81W6lB+uVTxbQGl5d8UitTe1hH8b2xoCjk4vzgLjjU334iFYu3PL85C/3lbFZTVmGKNGxuacH5xhkfXH+DNn/cYaRkGAGyebkWOnVz7HYHKtkwEx6ityJa3dwIlAiOnol4HgI8P3wEAxtbHhcWAbLItE7g3PBq0BRBA2VZPp1AU4Nj6uBUUtbeFSrSiYJ0AkAYIAJ+2NiIBxkGRzdrp20gRcQolq35scADwcvIVRvtHQo42djaxsP4MAIR2Mpv5/Fz6UOxJU6j5/FzFDzPmdKDIxvSpWzmmCCh4zue/UDBQhVwR/XcyIUc7X7YxND0YvUBdPfxyScuGOsPkIVXreSo4IYAq5IoYmh5EIVcU2oigSCqbQq6I4SejRssp2atpI6i0JVp1AObvA7WhAKQKprr1VK/IYl+8BCcE81XgwDGcV1ePqewkVtfy0kxZvcwUnuSydevmbZz8+hlp96K/1wgCABZ29oLfU9lJAAhBEQTFkBoUGwBpdS0PAFiaWQYAPF1+LPX3fPY1AGBxZVbqK3UoAgMQXIA/TzCseDCC4cXDEVTk5SQ33aik/X0qUmE8z/++/QMA8PnDVqg9CyUCunv/clXenekMQcmCF8Ugjdf2my8BseLheLEwrLoznQBq+CHb8zx/aWZZGiAQhYtrS+rOdNYGiu5tGkc6YLrwNL5cgBlD+eUS9nePtYIWSZbFrr7WyjqxVlAAsL97HAmSBYwbX3xHdPW1VvzXCgq4XFEQGEkGqBJlCajB7QeEwXgoG7kGAhJu4xGVdVO5LudAgg1XVNqTanFl9t/Z7+dqF4zNNh2VrqBChhqbSUiudrJox2ZT0kmuoFjVbJ5KUy6g/gJQr2nN/3gfRAAAAABJRU5ErkJggg==' // Default Room Sprite (像素 Sully)
   },
   
   spriteConfig: {
@@ -419,6 +467,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const [characters, setCharacters] = useState<CharacterProfile[]>([]);
   const [activeCharacterId, setActiveCharacterId] = useState<string>('');
+
+  // 刷新后能恢复"上一次聊的角色"：所有调用方（聊天切换/通知 onclick/记忆宫殿 handleSwitchChar）
+  // 都走裸 setActiveCharacterId，集中在这里同步到 localStorage，避免每个调用点各写一遍
+  useEffect(() => {
+    if (activeCharacterId) {
+      try { localStorage.setItem('os_last_active_char_id', activeCharacterId); } catch {}
+    }
+  }, [activeCharacterId]);
   
   const [groups, setGroups] = useState<GroupProfile[]>([]); 
   const [worldbooks, setWorldbooks] = useState<Worldbook[]>([]); 
@@ -431,6 +487,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [apiPresets, setApiPresets] = useState<ApiPreset[]>([]);
   const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig>(defaultRealtimeConfig);
+  const [memoryPalaceConfig, setMemoryPalaceConfig] = useState<MemoryPalaceGlobalConfig>(() => {
+    try { const s = localStorage.getItem('os_memory_palace_config'); return s ? { ...defaultMemoryPalaceConfig, ...JSON.parse(s) } : defaultMemoryPalaceConfig; } catch { return defaultMemoryPalaceConfig; }
+  });
+  const defaultRemoteVectorConfig = { enabled: false, supabaseUrl: '', supabaseAnonKey: '', initialized: false };
+  const [remoteVectorConfig, setRemoteVectorConfig] = useState(() => {
+    try { const s = localStorage.getItem('os_remote_vector_config'); return s ? { ...defaultRemoteVectorConfig, ...JSON.parse(s) } : defaultRemoteVectorConfig; } catch { return defaultRemoteVectorConfig; }
+  });
   const [customThemes, setCustomThemes] = useState<ChatTheme[]>([]);
   const [customIcons, setCustomIcons] = useState<Record<string, string>>({});
   const [appearancePresets, setAppearancePresets] = useState<AppearancePreset[]>([]);
@@ -444,6 +507,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   
   // Sys Operation Status
   const [sysOperation, setSysOperation] = useState<{ status: 'idle' | 'processing', message: string, progress: number }>({ status: 'idle', message: '', progress: 0 });
+
+  // Cloud Backup Config
+  const defaultCloudBackupConfig: CloudBackupConfig = {
+      enabled: false, webdavUrl: '', username: '', password: '',
+      remotePath: '/SullyBackup/',
+  };
+  const [cloudBackupConfig, setCloudBackupConfig] = useState<CloudBackupConfig>(() => {
+      try { const s = localStorage.getItem('os_cloud_backup_config'); return s ? { ...defaultCloudBackupConfig, ...JSON.parse(s) } : defaultCloudBackupConfig; } catch { return defaultCloudBackupConfig; }
+  });
 
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interceptorsInitialized = useRef(false);
@@ -736,8 +808,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                  const isCorrupted = !currentSprites['normal'] || !currentSprites['chibi'];
                  const needsWallUpdate = existingSully.roomConfig?.wallImage !== sullyV2.roomConfig?.wallImage;
                  const needsSkinSets = !existingSully.dateSkinSets || existingSully.dateSkinSets.length === 0;
+                 // 旧版 chibi 仍指向远端 sharkpan 资源 → 升级为内置像素立绘
+                 const hasLegacyChibi = typeof currentSprites['chibi'] === 'string'
+                     && currentSprites['chibi'].includes('sharkpan.xyz/f/oWZQF4/S2.png');
 
-                 if (isCorrupted || !existingSully.roomConfig || needsWallUpdate || needsSkinSets) {
+                 if (isCorrupted || !existingSully.roomConfig || needsWallUpdate || needsSkinSets || hasLegacyChibi) {
                      const restoredSprites = { ...sullyV2.sprites, ...currentSprites };
 
                      if (!restoredSprites['normal']) restoredSprites['normal'] = sullyV2.sprites!['normal'];
@@ -746,6 +821,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                      if (!restoredSprites['angry']) restoredSprites['angry'] = sullyV2.sprites!['angry'];
                      if (!restoredSprites['shy']) restoredSprites['shy'] = sullyV2.sprites!['shy'];
                      if (!restoredSprites['chibi']) restoredSprites['chibi'] = sullyV2.sprites!['chibi'];
+                     if (hasLegacyChibi) restoredSprites['chibi'] = sullyV2.sprites!['chibi'];
 
                      const updatedRoomConfig = existingSully.roomConfig ? {
                          ...existingSully.roomConfig,
@@ -806,6 +882,26 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         console.error('Data init failed:', err);
       } finally {
         setIsDataLoaded(true);
+
+        // 检测：远程向量存储已配置但远程可能缺数据（导入备份后）
+        try {
+            const rvConfig = JSON.parse(localStorage.getItem('os_remote_vector_config') || '{}');
+            if (rvConfig.enabled && rvConfig.initialized && rvConfig.supabaseUrl) {
+                const { getVectorCount } = await import('../utils/memoryPalace/supabaseVector');
+                const remoteCount = await getVectorCount(rvConfig);
+                // 本地向量数量
+                const localDb = await import('../utils/db').then(m => m.openDB());
+                const localCount = await new Promise<number>((res) => {
+                    const tx = localDb.transaction('memory_vectors', 'readonly');
+                    const req = tx.objectStore('memory_vectors').count();
+                    req.onsuccess = () => res(req.result);
+                    req.onerror = () => res(0);
+                });
+                if (localCount > 0 && remoteCount < localCount * 0.5) {
+                    setTimeout(() => addToast(`本地有 ${localCount} 条向量，远程仅 ${remoteCount} 条。建议去设置页同步到远程。`, 'info'), 3000);
+                }
+            }
+        } catch { /* 静默 */ }
       }
     };
 
@@ -1024,6 +1120,25 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const proactiveRunningRef = useRef(false);
   const proactiveQueueRef = useRef<string[]>([]);
+
+  // Refs to avoid stale closures in proactive callback
+  const charactersRef = useRef(characters);
+  charactersRef.current = characters;
+  const apiConfigRef = useRef(apiConfig);
+  apiConfigRef.current = apiConfig;
+
+  // Keep the MiniMax endpoint module in sync with the user's region choice
+  // so every minimaxFetch() call reads the latest preference.
+  useEffect(() => {
+    setMinimaxRegion(apiConfig.minimaxRegion);
+  }, [apiConfig.minimaxRegion]);
+  const userProfileRef = useRef(userProfile);
+  userProfileRef.current = userProfile;
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+  const realtimeConfigRef = useRef(realtimeConfig);
+  realtimeConfigRef.current = realtimeConfig;
+
   useEffect(() => {
       if (!isDataLoaded) return;
 
@@ -1042,7 +1157,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return;
           }
 
-          const char = characters.find(c => c.id === charId);
+          // Read from refs to always get latest values
+          const currentCharacters = charactersRef.current;
+          const currentApiConfig = apiConfigRef.current;
+          const currentUserProfile = userProfileRef.current;
+          const currentGroups = groupsRef.current;
+          const currentRealtimeConfig = realtimeConfigRef.current;
+
+          const char = currentCharacters.find(c => c.id === charId);
           if (!char) {
               drainQueuedProactive();
               return;
@@ -1058,7 +1180,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Determine which API to use
           const pCfg = char.proactiveConfig;
           const useSecondary = pCfg?.useSecondaryApi && pCfg.secondaryApi?.baseUrl;
-          const api = useSecondary ? pCfg!.secondaryApi! : apiConfig;
+          const api = useSecondary ? pCfg!.secondaryApi! : currentApiConfig;
           if (!api.baseUrl) {
               drainQueuedProactive();
               return;
@@ -1086,7 +1208,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
 
               // 2. Save hidden system hint
-              const userName = userProfile?.name || '对方';
+              const userName = currentUserProfile?.name || '对方';
               await DB.saveMessage({
                   charId,
                   role: 'user',
@@ -1099,8 +1221,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               const allMsgs = await DB.getRecentMessagesByCharId(charId, char.contextLimit || 500);
               const emojis = await DB.getEmojis();
               const categories = await DB.getEmojiCategories();
-              const systemPrompt = await ChatPrompts.buildSystemPrompt(char, userProfile, groups, emojis, categories, allMsgs, realtimeConfig);
-              const { apiMessages } = ChatPrompts.buildMessageHistory(allMsgs, char.contextLimit || 500, char, userProfile, emojis);
+              const systemPrompt = await ChatPrompts.buildSystemPrompt(char, currentUserProfile, currentGroups, emojis, categories, allMsgs, currentRealtimeConfig);
+              const { apiMessages } = ChatPrompts.buildMessageHistory(allMsgs, char.contextLimit || 500, char, currentUserProfile, emojis);
               const fullMessages = [{ role: 'system', content: systemPrompt }, ...apiMessages];
 
               // 4. API call
@@ -1194,7 +1316,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Cleanup: detach proactive listeners when OSContext unmounts (unlikely but safe)
           ProactiveChat.onTrigger(() => {});
       };
-  }, [isDataLoaded, characters, apiConfig, userProfile, groups, realtimeConfig]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
     const { wallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
@@ -1294,6 +1417,84 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const updateApiConfig = (updates: Partial<APIConfig>) => { const newConfig = { ...apiConfig, ...updates }; setApiConfig(newConfig); localStorage.setItem('os_api_config', JSON.stringify(newConfig)); };
   const updateRealtimeConfig = (updates: Partial<RealtimeConfig>) => { const newConfig = { ...realtimeConfig, ...updates }; setRealtimeConfig(newConfig); localStorage.setItem('os_realtime_config', JSON.stringify(newConfig)); };
+
+  // Cloud Backup functions
+  const updateCloudBackupConfig = (updates: Partial<CloudBackupConfig>) => {
+      const newConfig = { ...cloudBackupConfig, ...updates };
+      setCloudBackupConfig(newConfig);
+      localStorage.setItem('os_cloud_backup_config', JSON.stringify(newConfig));
+  };
+
+  const cloudBackupToWebDAV = async (mode: 'text_only' | 'media_only' | 'full') => {
+      const { uploadBackup, cleanupOldBackups } = await import('../utils/webdavClient');
+      try {
+          setSysOperation({ status: 'processing', message: '正在打包备份数据...', progress: 0 });
+          const blob = await exportSystem(mode);
+
+          setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 50 });
+          const filename = `Sully_Backup_${mode}_${Date.now()}.zip`;
+          const result = await uploadBackup(cloudBackupConfig, blob, filename, (pct) => {
+              setSysOperation(prev => ({ ...prev, message: `上传中 ${pct}%...`, progress: 50 + pct * 0.45 }));
+          });
+
+          if (!result.ok) {
+              throw new Error(result.message);
+          }
+
+          // Update last backup time
+          updateCloudBackupConfig({ lastBackupTime: Date.now(), lastBackupSize: blob.size });
+
+          // Cleanup old backups (keep latest 5)
+          await cleanupOldBackups(cloudBackupConfig, 5).catch(() => {});
+
+          setSysOperation({ status: 'idle', message: '', progress: 100 });
+          addToast('云端备份完成', 'success');
+      } catch (e: any) {
+          setSysOperation({ status: 'idle', message: '', progress: 0 });
+          addToast(`云端备份失败: ${e.message}`, 'error');
+          throw e;
+      }
+  };
+
+  const cloudRestoreFromWebDAV = async (file: CloudBackupFile) => {
+      const { downloadBackup } = await import('../utils/webdavClient');
+      try {
+          setSysOperation({ status: 'processing', message: '正在从云端下载...', progress: 0 });
+          const blob = await downloadBackup(cloudBackupConfig, file, (pct) => {
+              setSysOperation(prev => ({ ...prev, message: `下载中 ${pct}%...`, progress: pct * 0.5 }));
+          });
+
+          if (!blob) throw new Error('下载失败');
+
+          setSysOperation({ status: 'processing', message: '正在恢复数据...', progress: 50 });
+          const zipFile = new File([blob], file.name, { type: 'application/zip' });
+          await importSystem(zipFile);
+      } catch (e: any) {
+          setSysOperation({ status: 'idle', message: '', progress: 0 });
+          addToast(`云端恢复失败: ${e.message}`, 'error');
+          throw e;
+      }
+  };
+
+  const listCloudBackups = async (): Promise<CloudBackupFile[]> => {
+      const { listBackups } = await import('../utils/webdavClient');
+      return listBackups(cloudBackupConfig);
+  };
+
+  const updateMemoryPalaceConfig = (updates: Partial<MemoryPalaceGlobalConfig>) => {
+    const newConfig: MemoryPalaceGlobalConfig = {
+      embedding: { ...memoryPalaceConfig.embedding, ...(updates.embedding || {}) },
+      lightLLM: { ...memoryPalaceConfig.lightLLM, ...(updates.lightLLM || {}) },
+      rerank: { ...memoryPalaceConfig.rerank, ...(updates.rerank || {}) },
+    };
+    setMemoryPalaceConfig(newConfig);
+    localStorage.setItem('os_memory_palace_config', JSON.stringify(newConfig));
+  };
+  const updateRemoteVectorConfig = (updates: Partial<typeof defaultRemoteVectorConfig>) => {
+    const newConfig = { ...remoteVectorConfig, ...updates };
+    setRemoteVectorConfig(newConfig);
+    localStorage.setItem('os_remote_vector_config', JSON.stringify(newConfig));
+  };
   const saveModels = (models: string[]) => { setAvailableModels(models); localStorage.setItem('os_available_models', JSON.stringify(models)); };
   const addApiPreset = (name: string, config: APIConfig) => { setApiPresets(prev => { const next = [...prev, { id: Date.now().toString(), name, config }]; localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
   const removeApiPreset = (id: string) => { setApiPresets(prev => { const next = prev.filter(p => p.id !== id); localStorage.setItem('os_api_presets', JSON.stringify(next)); return next; }); };
@@ -1437,7 +1638,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const addCustomTheme = async (theme: ChatTheme) => { setCustomThemes(prev => { const exists = prev.find(t => t.id === theme.id); if (exists) return prev.map(t => t.id === theme.id ? theme : t); return [...prev, theme]; }); await DB.saveTheme(theme); };
   const removeCustomTheme = async (id: string) => { setCustomThemes(prev => prev.filter(t => t.id !== id)); await DB.deleteTheme(id); };
   const setCustomIcon = async (appId: string, iconUrl: string | undefined) => { setCustomIcons(prev => { const next = { ...prev }; if (iconUrl) next[appId] = iconUrl; else delete next[appId]; return next; }); if (iconUrl) { await DB.saveAsset(`icon_${appId}`, iconUrl); } else { await DB.deleteAsset(`icon_${appId}`); } };
-  const handleSetActiveCharacter = (id: string) => { setActiveCharacterId(id); localStorage.setItem('os_last_active_char_id', id); };
   const addToast = (message: string, type: Toast['type'] = 'info') => { const id = Date.now().toString(); setToasts(prev => [...prev, { id, message, type }]); setTimeout(() => { setToasts(prev => prev.filter(t => t.id !== id)); }, 3000); };
 
   // --- APPEARANCE PRESETS ---
@@ -1625,7 +1825,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'room_notes', 'groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'worldbooks', 'novels', 'songs',
               'bank_transactions', 'bank_data',
               'xhs_activities', 'xhs_stock',
-              'quizzes', 'guidebook', 'scheduled_messages', 'life_sim'
+              'quizzes', 'guidebook', 'scheduled_messages', 'life_sim',
+              'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
+              'daily_schedule', 'memory_batches',
+              'pixel_home_assets', 'pixel_home_layouts'
           ];
 
           if (mode === 'full') {
@@ -1634,7 +1837,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               storesToProcess = allStores.filter(s => s !== 'assets'); // Exclude raw assets store
           } else if (mode === 'media_only') {
               // media_only now includes themes/assets for complete media backup
-              storesToProcess = ['gallery', 'emojis', 'emoji_categories', 'journal_stickers', 'user_profile', 'characters', 'messages', 'themes', 'assets', 'bank_data'];
+              storesToProcess = ['gallery', 'emojis', 'emoji_categories', 'journal_stickers', 'user_profile', 'characters', 'messages', 'themes', 'assets', 'bank_data',
+                  'pixel_home_assets', 'pixel_home_layouts', 'daily_schedule'];
           }
 
           // Fetch Social App & Room Assets (Optional, depends on mode)
@@ -1649,6 +1853,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               apiPresets: (mode === 'text_only' || mode === 'full') ? apiPresets : undefined,
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
               realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
+              memoryPalaceConfig: (mode === 'text_only' || mode === 'full') ? memoryPalaceConfig : undefined,
               theme: theme, // Include theme in all modes (text/media)
               customIcons: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
                   ? { ...customIcons }
@@ -1670,6 +1875,80 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // Study Room settings (localStorage)
               studyApiConfig: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('study_api_config'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
               studyTutorPresets: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('study_tutor_presets'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+
+              // 云端配置
+              cloudBackupConfig: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('os_cloud_backup_config'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+              remoteVectorConfig: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('os_remote_vector_config'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+
+              // Memory Palace 水位线
+              memoryPalaceHighWaterMarks: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const hwm: Record<string, number> = {};
+                  for (let i = 0; i < localStorage.length; i++) {
+                      const key = localStorage.key(i);
+                      if (key?.startsWith('mp_lastMsgId_')) {
+                          const charId = key.replace('mp_lastMsgId_', '');
+                          hwm[charId] = parseInt(localStorage.getItem(key) || '0', 10);
+                      }
+                  }
+                  return Object.keys(hwm).length > 0 ? hwm : undefined;
+              })() : undefined,
+
+              // Memory Palace 每角色的 UI 标记（人格检测已跑过、首次归档 banner 已看过等）
+              // 丢了会导致重弹一次人格确认 / 首次 banner，体验噪声但不丢数据，仍然应该备份
+              memoryPalaceFlags: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const flags: Record<string, string> = {};
+                  for (let i = 0; i < localStorage.length; i++) {
+                      const key = localStorage.key(i);
+                      if (!key) continue;
+                      if (key.startsWith('mp_personality_tried_')
+                          || key.startsWith('mp_first_archive_notice_')) {
+                          flags[key] = localStorage.getItem(key) || '';
+                      }
+                  }
+                  return Object.keys(flags).length > 0 ? flags : undefined;
+              })() : undefined,
+
+              // Chat 翻译 / 归档 / 润色相关设置
+              chatTranslateSourceLang: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('chat_translate_source_lang') || undefined) : undefined,
+              chatTranslateTargetLang: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('chat_translate_lang') || undefined) : undefined,
+              chatTranslateEnabledByChar: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const map: Record<string, boolean> = {};
+                  for (let i = 0; i < localStorage.length; i++) {
+                      const key = localStorage.key(i);
+                      if (!key || !key.startsWith('chat_translate_enabled_')) continue;
+                      const charId = key.replace('chat_translate_enabled_', '');
+                      map[charId] = localStorage.getItem(key) === 'true';
+                  }
+                  return Object.keys(map).length > 0 ? map : undefined;
+              })() : undefined,
+              chatArchivePrompts: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('chat_archive_prompts'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+              chatActiveArchivePromptId: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('chat_active_archive_prompt_id') || undefined) : undefined,
+              characterRefinePrompts: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('character_refine_prompts'); return s ? JSON.parse(s) : undefined; } catch { return undefined; } })() : undefined,
+              characterActiveRefinePromptId: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('character_active_refine_prompt_id') || undefined) : undefined,
+
+              // UI / 偏好
+              scheduleAppTheme: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('schedule_app_theme') || undefined) : undefined,
+              groupchatContextLimit: (mode === 'text_only' || mode === 'full') ? (() => { const v = localStorage.getItem('groupchat_context_limit'); const n = v ? parseInt(v, 10) : NaN; return Number.isFinite(n) ? n : undefined; })() : undefined,
+              browserConfig: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const braveKey = localStorage.getItem('browser_brave_key') || undefined;
+                  const useReal = localStorage.getItem('browser_use_real_search');
+                  const useRealSearch = useReal === null ? undefined : useReal === 'true';
+                  if (!braveKey && useRealSearch === undefined) return undefined;
+                  return { braveKey, useRealSearch };
+              })() : undefined,
+              bm25Mode: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('bm25_mode') || undefined) : undefined,
+              lastActiveCharId: (mode === 'text_only' || mode === 'full') ? (localStorage.getItem('os_last_active_char_id') || undefined) : undefined,
+              eventNotifFlags: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const flags: Record<string, string> = {};
+                  for (let i = 0; i < localStorage.length; i++) {
+                      const key = localStorage.key(i);
+                      if (!key) continue;
+                      if (key.startsWith('sullyos_')) {
+                          flags[key] = localStorage.getItem(key) || '';
+                      }
+                  }
+                  return Object.keys(flags).length > 0 ? flags : undefined;
+              })() : undefined,
           };
 
           const totalSteps = storesToProcess.length + 3;
@@ -1708,15 +1987,35 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
           }
 
+          // Stores that never contain base64 image data — skip recursive traversal
+          const noImageStores = new Set([
+              'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
+              'bank_transactions', 'scheduled_messages', 'memory_batches'
+          ]);
+
+          // Chunked processObject for large arrays — yields to main thread every 200 items
+          const processArrayChunked = async (arr: any[], fn: (item: any) => any, chunkSize = 200): Promise<any[]> => {
+              if (arr.length <= chunkSize) return arr.map(fn);
+              const result: any[] = [];
+              for (let i = 0; i < arr.length; i += chunkSize) {
+                  const chunk = arr.slice(i, i + chunkSize).map(fn);
+                  result.push(...chunk);
+                  if (i + chunkSize < arr.length) {
+                      await new Promise(r => setTimeout(r, 0));
+                  }
+              }
+              return result;
+          };
+
           for (const storeName of storesToProcess) {
               currentStep++;
-              setSysOperation({ 
-                  status: 'processing', 
-                  message: `正在打包: ${storeName} ...`, 
-                  progress: (currentStep / totalSteps) * 100 
+              setSysOperation({
+                  status: 'processing',
+                  message: `正在打包: ${storeName} ...`,
+                  progress: (currentStep / totalSteps) * 100
               });
 
-              let rawData = await DB.getRawStoreData(storeName); 
+              let rawData = await DB.getRawStoreData(storeName);
               let processedData: any;
 
               // --- MODE SPECIFIC FILTERING ---
@@ -1728,8 +2027,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   });
               }
 
-              if (mode === 'text_only') {
-                  processedData = stripBase64(rawData);
+              // Fast path: stores with no image data skip expensive recursive traversal
+              if (noImageStores.has(storeName)) {
+                  processedData = rawData;
+              } else if (mode === 'text_only') {
+                  processedData = Array.isArray(rawData) && rawData.length > 200
+                      ? await processArrayChunked(rawData, stripBase64)
+                      : stripBase64(rawData);
               } else {
                   // Media & Theme Mode: Extract Images
                   
@@ -1765,7 +2069,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       continue; // Skip standard assignment
                   }
 
-                  processedData = processObject(rawData);
+                  processedData = Array.isArray(rawData) && rawData.length > 200
+                      ? await processArrayChunked(rawData, processObject)
+                      : processObject(rawData);
               }
 
               // Assign to Backup Data
@@ -1807,20 +2113,75 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'guidebook': backupData.guidebookSessions = processedData; break;
                   case 'scheduled_messages': backupData.scheduledMessages = processedData; break;
                   case 'life_sim': backupData.lifeSimState = Array.isArray(processedData) ? (processedData[0] || null) : (processedData || null); break;
+                  case 'memory_nodes': backupData.memoryNodes = processedData; break;
+                  case 'memory_vectors': backupData.memoryVectors = processedData; break;
+                  case 'memory_links': backupData.memoryLinks = processedData; break;
+                  case 'topic_boxes': backupData.topicBoxes = processedData; break;
+                  case 'anticipations': backupData.anticipations = processedData; break;
+                  case 'event_boxes': backupData.eventBoxes = processedData; break;
+                  case 'daily_schedule': backupData.dailySchedules = processedData; break;
+                  case 'memory_batches': backupData.memoryBatches = processedData; break;
+                  case 'pixel_home_assets': backupData.pixelHomeAssets = processedData; break;
+                  case 'pixel_home_layouts': backupData.pixelHomeLayouts = processedData; break;
               }
 
               await new Promise(resolve => setTimeout(resolve, 10));
           }
 
           setSysOperation({ status: 'processing', message: '正在生成压缩包...', progress: 95 });
-          
-          zip.file("data.json", JSON.stringify(backupData));
-          
-          const content = await zip.generateAsync({ type: "blob" }, (metadata) => {
-              if (Math.random() > 0.8) {
-                  setSysOperation(prev => ({ ...prev, message: `压缩中 ${metadata.percent.toFixed(0)}%...` }));
+
+          // --- MEMORY-OPTIMIZED INCREMENTAL SERIALIZATION ---
+          // Instead of JSON.stringify(entire backupData) which doubles peak memory,
+          // we serialize large arrays separately and build the JSON incrementally.
+          const largeArrayKeys = ['characters', 'messages', 'assets', 'galleryImages',
+              'savedEmojis', 'memoryNodes', 'memoryVectors', 'memoryLinks',
+              'socialPosts', 'diaries', 'worldbooks', 'novels', 'xhsActivities',
+              'bankTransactions', 'quizSessions', 'guidebookSessions',
+              'topicBoxes', 'anticipations', 'eventBoxes', 'roomCustomAssets', 'mediaAssets',
+              'customThemes', 'appearancePresets', 'courses', 'games', 'songs',
+              'roomTodos', 'roomNotes', 'tasks', 'anniversaries', 'groups',
+              'savedJournalStickers', 'emojiCategories', 'xhsStockImages',
+              'scheduledMessages',
+              'dailySchedules', 'memoryBatches', 'pixelHomeAssets', 'pixelHomeLayouts'] as const;
+
+          // Build metadata (small fields) separately
+          const metadata: Record<string, any> = {};
+          const largeKeySet = new Set(largeArrayKeys as readonly string[]);
+          for (const key of Object.keys(backupData)) {
+              if (!largeKeySet.has(key)) {
+                  metadata[key] = (backupData as any)[key];
               }
-          });
+          }
+
+          // Build JSON string incrementally: "{metadata..., largeKey1:[...], largeKey2:[...]}"
+          const metaStr = JSON.stringify(metadata);
+          const jsonParts: string[] = [metaStr.slice(0, -1)]; // Remove trailing '}'
+
+          let addedLarge = false;
+          for (const key of largeArrayKeys) {
+              const value = (backupData as any)[key];
+              if (value === undefined || value === null) continue;
+              jsonParts.push(`${addedLarge || metaStr.length > 2 ? ',' : ''}"${key}":${JSON.stringify(value)}`);
+              addedLarge = true;
+              // Release reference immediately to allow GC
+              (backupData as any)[key] = undefined;
+              // Yield to let GC run
+              await new Promise(r => setTimeout(r, 0));
+          }
+          jsonParts.push('}');
+
+          zip.file("data.json", jsonParts.join(''));
+          // Release parts
+          jsonParts.length = 0;
+
+          const content = await zip.generateAsync(
+              { type: "blob", streamFiles: true, compression: "DEFLATE", compressionOptions: { level: 6 } },
+              (metadata) => {
+                  if (Math.random() > 0.8) {
+                      setSysOperation(prev => ({ ...prev, message: `压缩中 ${metadata.percent.toFixed(0)}%...` }));
+                  }
+              }
+          );
 
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           return content;
@@ -1915,6 +2276,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.availableModels) saveModels(data.availableModels);
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
+          if (data.memoryPalaceConfig) updateMemoryPalaceConfig(data.memoryPalaceConfig); // 恢复记忆宫殿全局配置
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
               const existingAssets = await DB.getAllAssets();
@@ -1943,6 +2305,63 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Restore Study Room settings
           if (data.studyApiConfig) localStorage.setItem('study_api_config', JSON.stringify(data.studyApiConfig));
           if (data.studyTutorPresets) localStorage.setItem('study_tutor_presets', JSON.stringify(data.studyTutorPresets));
+
+          // Restore 云端配置
+          if (data.cloudBackupConfig) localStorage.setItem('os_cloud_backup_config', JSON.stringify(data.cloudBackupConfig));
+          if (data.remoteVectorConfig) localStorage.setItem('os_remote_vector_config', JSON.stringify(data.remoteVectorConfig));
+
+          // Restore Memory Palace 水位线
+          if (data.memoryPalaceHighWaterMarks) {
+              for (const [charId, hwm] of Object.entries(data.memoryPalaceHighWaterMarks)) {
+                  if (typeof hwm === 'number' && hwm > 0) {
+                      localStorage.setItem(`mp_lastMsgId_${charId}`, String(hwm));
+                  }
+              }
+          }
+
+          // Restore Memory Palace UI flags（人格检测已跑过 / 首次 banner 已见等）
+          if (data.memoryPalaceFlags && typeof data.memoryPalaceFlags === 'object') {
+              for (const [key, val] of Object.entries(data.memoryPalaceFlags)) {
+                  if (typeof val === 'string') {
+                      // 只允许恢复 mp_ 前缀的键，避免导入数据污染其它 localStorage
+                      if (key.startsWith('mp_personality_tried_')
+                          || key.startsWith('mp_first_archive_notice_')) {
+                          localStorage.setItem(key, val);
+                      }
+                  }
+              }
+          }
+
+          // Restore Chat 翻译 / 归档 / 润色设置
+          if (typeof data.chatTranslateSourceLang === 'string') localStorage.setItem('chat_translate_source_lang', data.chatTranslateSourceLang);
+          if (typeof data.chatTranslateTargetLang === 'string') localStorage.setItem('chat_translate_lang', data.chatTranslateTargetLang);
+          if (data.chatTranslateEnabledByChar && typeof data.chatTranslateEnabledByChar === 'object') {
+              for (const [charId, enabled] of Object.entries(data.chatTranslateEnabledByChar)) {
+                  localStorage.setItem(`chat_translate_enabled_${charId}`, enabled ? 'true' : 'false');
+              }
+          }
+          if (data.chatArchivePrompts !== undefined) localStorage.setItem('chat_archive_prompts', JSON.stringify(data.chatArchivePrompts));
+          if (typeof data.chatActiveArchivePromptId === 'string') localStorage.setItem('chat_active_archive_prompt_id', data.chatActiveArchivePromptId);
+          if (data.characterRefinePrompts !== undefined) localStorage.setItem('character_refine_prompts', JSON.stringify(data.characterRefinePrompts));
+          if (typeof data.characterActiveRefinePromptId === 'string') localStorage.setItem('character_active_refine_prompt_id', data.characterActiveRefinePromptId);
+
+          // Restore UI / 偏好
+          if (typeof data.scheduleAppTheme === 'string') localStorage.setItem('schedule_app_theme', data.scheduleAppTheme);
+          if (typeof data.groupchatContextLimit === 'number') localStorage.setItem('groupchat_context_limit', String(data.groupchatContextLimit));
+          if (data.browserConfig && typeof data.browserConfig === 'object') {
+              if (typeof data.browserConfig.braveKey === 'string') localStorage.setItem('browser_brave_key', data.browserConfig.braveKey);
+              if (typeof data.browserConfig.useRealSearch === 'boolean') localStorage.setItem('browser_use_real_search', data.browserConfig.useRealSearch ? 'true' : 'false');
+          }
+          if (typeof data.bm25Mode === 'string') localStorage.setItem('bm25_mode', data.bm25Mode);
+          if (typeof data.lastActiveCharId === 'string') localStorage.setItem('os_last_active_char_id', data.lastActiveCharId);
+          if (data.eventNotifFlags && typeof data.eventNotifFlags === 'object') {
+              for (const [key, val] of Object.entries(data.eventNotifFlags)) {
+                  // 只允许 sullyos_ 前缀，避免污染其它键
+                  if (typeof val === 'string' && key.startsWith('sullyos_')) {
+                      localStorage.setItem(key, val);
+                  }
+              }
+          }
           
           if (data.socialAppData) {
               if (data.socialAppData.charHandles) localStorage.setItem('spark_char_handles', JSON.stringify(data.socialAppData.charHandles));
@@ -2089,6 +2508,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     removeApiPreset,
     realtimeConfig,
     updateRealtimeConfig,
+    memoryPalaceConfig,
+    updateMemoryPalaceConfig,
+    remoteVectorConfig,
+    updateRemoteVectorConfig,
     customThemes,
     addCustomTheme,
     removeCustomTheme,
@@ -2106,6 +2529,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     lastMsgTimestamp,
     unreadMessages,
     clearUnread,
+    cloudBackupConfig,
+    updateCloudBackupConfig,
+    cloudBackupToWebDAV,
+    cloudRestoreFromWebDAV,
+    listCloudBackups,
     exportSystem,
     importSystem,
     resetSystem,

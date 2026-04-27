@@ -31,6 +31,7 @@ export enum AppID {
   VoiceDesigner = 'voice_designer', // 捏声音 — MiniMax 音色设计器
   Guidebook = 'guidebook', // 攻略本 — 角色攻略用户小游戏
   LifeSim = 'lifesim', // 模拟人生 — 与角色共同经营的小世界
+  MemoryPalace = 'memory_palace', // 记忆宫殿 — 七个房间可视化
 }
 
 export interface SystemLog {
@@ -128,11 +129,17 @@ export interface VirtualTime {
   day: string;
 }
 
+export type MinimaxRegion = 'domestic' | 'overseas';
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
+  // 'domestic' → https://api.minimaxi.com (国内站)
+  // 'overseas' → https://api.minimax.io  (海外站)
+  // Missing / unknown falls back to domestic.
+  minimaxRegion?: MinimaxRegion;
   model: string;
 }
 
@@ -286,6 +293,30 @@ export interface RoomNote {
     content: string;
     type: 'lyric' | 'doodle' | 'thought' | 'search' | 'gossip';
     relatedMessageId?: number; 
+}
+
+export interface ScheduleSlot {
+    startTime: string;    // "08:00"
+    activity: string;     // "晨跑"
+    description?: string; // "在河边慢跑"
+    emoji?: string;       // "🏃"
+    location?: string;    // "河边"
+    innerThought?: string; // 该时段的内心独白，生成时由AI写好，运行时直接注入
+}
+
+export interface DailySchedule {
+    id: string;           // `${charId}_${date}`
+    charId: string;
+    date: string;         // YYYY-MM-DD
+    slots: ScheduleSlot[];
+    generatedAt: number;
+    coverImage?: string;  // 用户自定义角色看板图 (持久化)
+    /**
+     * 按时段生成的意识流独白。
+     * key = slot 的 startTime（如 "08:00"），value = 截止该时段的完整内心独白。
+     * 注入时根据当前时间找到最近的 key，直接使用整段文本，不做拼接。
+     */
+    flowNarrative?: Record<string, string>;
 }
 
 export interface RoomGeneratedState {
@@ -678,6 +709,92 @@ export interface BankFullState {
 }
 // ---------------------------------
 
+// --- CHAR MUSIC PROFILE (网易云风格 · 角色的音乐人格) ---
+
+/** 角色本地歌单里的轻量歌曲快照 — 字段与 MusicContext 的 Song 对齐（无运行时 url） */
+export interface CharPlaylistSong {
+    id: number;
+    name: string;
+    artists: string;
+    album: string;
+    albumPic: string;
+    duration: number;
+    fee: number;
+    /**
+     * 'user' = 这首是从 user 那里"抄"过来的（user 在听 → char 加进自己歌单）。
+     * 'discovered' = char 自己探索 / 初始化时找到的。
+     * 不写默认按 'discovered' 处理（向后兼容已有数据）。
+     * 用途：当 char 后续"在听"这首时，prompt 会告诉 LLM "这是从 user 那儿收来的"，
+     * 让记忆/对话能自然带上这层关系，而不是当成一首中立的歌。
+     */
+    source?: 'user' | 'discovered';
+    /** 加入歌单时间，用来排序 / 显示"最近收藏" */
+    addedAt?: number;
+}
+
+export interface CharPlaylist {
+    id: string;                 // 本地 id (不与网易云 playlistId 冲突)
+    title: string;
+    description: string;        // 角色自己写的歌单简介
+    coverStyle: string;         // 渐变色标识 or 第一首歌封面
+    songs: CharPlaylistSong[];
+    mood?: SongMood;
+    createdAt: number;
+    updatedAt: number;
+}
+
+export interface CharPlayRecord {
+    song: CharPlaylistSong;
+    at: number;                 // 播放时间戳（真实时间）
+    context?: string;           // 该时刻的心境备注，如 "失眠的时候"
+}
+
+export interface CharMusicReview {
+    id: string;
+    targetType: 'song' | 'user_playlist' | 'user_record';
+    targetId: string;           // songId or playlistId as string
+    targetTitle: string;        // 歌名 / 歌单名
+    content: string;            // 评论正文
+    createdAt: number;
+}
+
+/** 运行时"此刻在听" — 根据 Schedule 决定，不必持久化（可以随时 recompute） */
+export interface CharCurrentListening {
+    songId: number;
+    songName: string;
+    artists: string;
+    albumPic: string;
+    /** 心境 / 选曲理由（来自 slot.innerThought 或 description） */
+    vibe?: string;
+    startedAt: number;
+}
+
+export interface CharMusicProfile {
+    /** 音乐品味简介（LLM 初始化生成） */
+    bio: string;
+    /** 曲风标签（可随听歌演化） */
+    genreTags: string[];
+    /** 偏爱的艺人 */
+    signatureArtists: { name: string; artistId?: number }[];
+    /** 本地歌单列表 */
+    playlists: CharPlaylist[];
+    /** 仿 likelist */
+    likedSongIds: number[];
+    /** 最近在听（仿 user/record） */
+    recentPlays: CharPlayRecord[];
+    /** 私人 FM 关键词种子（留给未来做 char FM） */
+    fmSeed?: string;
+    /** 角色对歌/user 歌单的点评 */
+    reviews?: CharMusicReview[];
+    /** 此刻在听（Schedule 运行时填充，UI 展示用） */
+    currentListening?: CharCurrentListening;
+    /** 是否允许 char 读取 user 的网易云数据（默认 true） */
+    canReadUserMusic?: boolean;
+    /** 初始化时间 */
+    initializedAt?: number;
+    updatedAt: number;
+}
+
 export interface CharacterProfile {
   id: string;
   name: string;
@@ -790,6 +907,47 @@ export interface CharacterProfile {
       model: string;
     };
   };
+
+  // 记忆宫殿 (Memory Palace)
+  memoryPalaceEnabled?: boolean;
+  /**
+   * 是否启用"palace 提取后自动同步归档"：开启后每次 buffer 处理成功都会把新记忆按日期
+   * 合成 YAML MemoryFragment 追加到 char.memories，并推 hideBeforeMessageId 自动隐藏
+   * 已处理的聊天。默认 false（opt-in）——首次启用建议让用户做一次 force 追平历史。
+   */
+  autoArchiveEnabled?: boolean;
+  embeddingConfig?: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;        // 默认 text-embedding-3-small
+    dimensions: number;   // 默认 1024
+  };
+  personalityStyle?: 'emotional' | 'narrative' | 'imagery' | 'analytical';
+  ruminationTendency?: number;  // 反刍倾向 0-1，默认 0.3
+  memoryPalaceInjection?: string;  // 记忆宫殿检索结果，注入到 System Prompt（运行时填充，不持久化）
+
+  // 自我领悟词条：消化过程中 self_room 反刍产生的常驻认知
+  // 像情绪 buff 一样注入到 contextBuilder 的角色设定下方
+  selfInsights?: string[];
+
+  // 音乐人格 — 角色自己的网易云式歌单 / 品味 / 正在听
+  // 在音乐 App 里以"拜访"形式访问
+  musicProfile?: CharMusicProfile;
+
+  /**
+   * 日程风格：
+   * - 'lifestyle'（生活系，默认）：虚构角色，拥有日常物理生活（晨跑、做饭、逛街……）
+   * - 'mindful'（意识系）：角色诚实面对自身存在，内心活动基于真实能力（回忆对话、整理想法、等待用户……），不虚构物理行为
+   */
+  scheduleStyle?: 'lifestyle' | 'mindful';
+
+  /**
+   * 日程 / 情绪 Buff 总开关。
+   * - true：启用日程生成、意识流、情绪 buff 评估与注入（消耗副 API）。
+   * - false：完全关闭，不调副 API，不注入情绪，不生成日程。
+   * - undefined：向后兼容——若 scheduleStyle 已设（老用户已隐式选风格）视为开启；否则默认关闭。
+   */
+  scheduleFeatureEnabled?: boolean;
 }
 
 export interface GroupProfile {
@@ -1023,7 +1181,7 @@ export interface GameSession {
     lastPlayedAt: number;
 }
 
-export type MessageType = 'text' | 'image' | 'emoji' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card';
+export type MessageType = 'text' | 'image' | 'emoji' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card' | 'music_card';
 
 export interface Message {
     id: number;
@@ -1133,6 +1291,63 @@ export interface FullBackupData {
 
     // LifeSim
     lifeSimState?: LifeSimState | null;
+
+    // Memory Palace (记忆宫殿)
+    memoryNodes?: any[];
+    memoryVectors?: any[];
+    memoryLinks?: any[];
+    topicBoxes?: any[];
+    anticipations?: any[];
+    eventBoxes?: any[];
+    memoryPalaceHighWaterMarks?: Record<string, number>; // charId → lastProcessedMsgId
+    memoryPalaceFlags?: Record<string, string>; // mp_personality_tried_* / mp_first_archive_notice_* 等 UI 标记
+    cloudBackupConfig?: CloudBackupConfig;
+    remoteVectorConfig?: { enabled: boolean; supabaseUrl: string; supabaseAnonKey: string; initialized: boolean };
+
+    // Character daily schedule (角色日程表 — daily_schedule store)
+    dailySchedules?: DailySchedule[];
+
+    // Memory Palace 批次处理元数据
+    memoryBatches?: any[];
+
+    // Pixel Home（小屋像素界面）
+    pixelHomeAssets?: any[];
+    pixelHomeLayouts?: any[];
+
+    // Chat 设置（翻译 / 归档 / 润色 prompts）
+    chatTranslateSourceLang?: string;
+    chatTranslateTargetLang?: string;
+    chatTranslateEnabledByChar?: Record<string, boolean>;
+    chatArchivePrompts?: any;
+    chatActiveArchivePromptId?: string;
+    characterRefinePrompts?: any;
+    characterActiveRefinePromptId?: string;
+
+    // 其它 UI / 偏好
+    scheduleAppTheme?: string;
+    groupchatContextLimit?: number;
+    browserConfig?: { braveKey?: string; useRealSearch?: boolean };
+    bm25Mode?: string;
+    lastActiveCharId?: string;
+    eventNotifFlags?: Record<string, string>;  // sullyos_* 事件通知标记
+}
+
+// --- CLOUD BACKUP (WebDAV) TYPES ---
+export interface CloudBackupConfig {
+    enabled: boolean;
+    webdavUrl: string;          // e.g. https://dav.jianguoyun.com/dav/
+    username: string;
+    password: string;           // App-specific password
+    remotePath: string;         // e.g. /SullyBackup/
+    lastBackupTime?: number;    // timestamp
+    lastBackupSize?: number;    // bytes
+}
+
+export interface CloudBackupFile {
+    name: string;
+    size: number;
+    lastModified: string;       // ISO date string
+    href: string;               // full path on WebDAV
 }
 
 // --- GUIDEBOOK (攻略本) APP TYPES ---

@@ -68,8 +68,8 @@ const ForwardCard: React.FC<{
                                     <div className={`max-w-[80%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
                                         <div className="text-[10px] text-slate-400 mb-1 px-1">{senderName} {msg.timestamp ? formatTime(msg.timestamp) : ''}</div>
                                         <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-all ${isUser ? 'bg-primary text-white rounded-br-sm' : 'bg-white text-slate-700 rounded-bl-sm shadow-sm border border-slate-100'}`}>
-                                            {msg.type === 'image' ? <img src={msg.content} className="max-w-[200px] rounded-xl" /> :
-                                             msg.type === 'emoji' ? <img src={msg.content} className="max-w-[100px]" /> :
+                                            {msg.type === 'image' ? (msg.content ? <img src={msg.content} className="max-w-[200px] rounded-xl" /> : <span className="italic opacity-60">[图片已丢失]</span>) :
+                                             msg.type === 'emoji' ? (msg.content ? <img src={msg.content} className="max-w-[100px]" /> : <span className="italic opacity-60">[表情已丢失]</span>) :
                                              msg.content}
                                         </div>
                                     </div>
@@ -569,6 +569,151 @@ const MessageItem = React.memo(({
         }
     }
 
+    // --- Music Card Rendering (一起听 / 加入歌单) ---
+    if (m.type === 'music_card' && m.metadata?.song) {
+        const song = m.metadata.song as { songId: number; name: string; artists: string; albumPic: string };
+        const intent = (m.metadata.intent || 'join') as 'join' | 'add' | 'join_and_add';
+        const isTogether = intent === 'join' || intent === 'join_and_add';
+        const addedTo = m.metadata.addedToPlaylistTitle as string | undefined;
+
+        // 头像渲染：有图用图，无图显姓名首字
+        const renderAvatar = (src: string | undefined, name: string, ring: string) => (
+            <div
+                className="relative shrink-0 rounded-full overflow-hidden"
+                style={{
+                    width: 32, height: 32,
+                    boxShadow: `0 0 0 2px #fff, 0 0 0 3.5px ${ring}, 0 2px 6px ${ring}66`,
+                }}
+            >
+                {src ? (
+                    <img src={src} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer"
+                        onError={(e: any) => {
+                            const img = e.target;
+                            const p = img.parentElement;
+                            if (!p || p.querySelector('.ava-fallback')) return;
+                            img.style.display = 'none';
+                            const fb = document.createElement('div');
+                            fb.className = 'ava-fallback w-full h-full flex items-center justify-center text-white text-xs font-semibold';
+                            fb.style.background = `linear-gradient(135deg, ${ring}, #c3b2ff)`;
+                            fb.textContent = (name || '·').slice(0, 1);
+                            p.appendChild(fb);
+                        }}
+                    />
+                ) : (
+                    <div className="w-full h-full flex items-center justify-center text-white text-xs font-semibold"
+                        style={{ background: `linear-gradient(135deg, ${ring}, #c3b2ff)` }}>
+                        {(name || '·').slice(0, 1)}
+                    </div>
+                )}
+            </div>
+        );
+
+        return commonLayout(
+            <div className="w-64 rounded-2xl overflow-hidden shadow-sm border cursor-pointer active:opacity-90 transition-opacity"
+                style={{
+                    borderColor: '#f3d9e6',
+                    background: 'linear-gradient(135deg, #fff2f7 0%, #f5edff 55%, #eaf1ff 100%)',
+                }}>
+
+                {/* 一起听 · 居中双头像头图（仅 join / join_and_add 显示）*/}
+                {isTogether && (
+                    <div className="relative px-3 pt-3 pb-2 overflow-hidden">
+                        {/* 粉紫光晕背景 */}
+                        <div aria-hidden className="pointer-events-none absolute inset-0 opacity-70"
+                            style={{
+                                background: `radial-gradient(ellipse at 30% 50%, rgba(255,170,200,0.32) 0%, transparent 52%),
+                                             radial-gradient(ellipse at 70% 50%, rgba(195,178,255,0.32) 0%, transparent 55%)`,
+                            }} />
+                        {/* 居中：用户头像 · ♥ · 角色头像 */}
+                        <div className="relative flex items-center justify-center gap-2">
+                            {renderAvatar(userAvatar, '你', '#ffb5cf')}
+                            <svg width="16" height="15" viewBox="0 0 24 22" fill="none"
+                                className="animate-pulse"
+                                style={{ color: '#ff7fae', filter: 'drop-shadow(0 0 5px rgba(255,127,174,0.55))' }}>
+                                <path d="M12 21s-8-5.3-8-11.5C4 6 6.5 3.5 9.5 3.5c1.6 0 3 .8 2.5 2.2C11.5 4.3 12.9 3.5 14.5 3.5 17.5 3.5 20 6 20 9.5 20 15.7 12 21 12 21z"
+                                    fill="currentColor" />
+                            </svg>
+                            {renderAvatar(charAvatar, charName, '#c3b2ff')}
+                        </div>
+                        {/* 标签 */}
+                        <div className="relative mt-1.5 text-center text-[9px] tracking-[0.3em] uppercase font-semibold"
+                            style={{ color: '#9c6fc2', opacity: 0.8 }}>
+                            Listening Together
+                        </div>
+                        <div className="relative mt-0.5 text-center text-[11px]"
+                            style={{ color: '#5a49a8', fontFamily: `'Noto Serif','Georgia',serif` }}>
+                            <span className="font-medium">你</span>
+                            <span className="mx-1.5 opacity-50">×</span>
+                            <span className="font-medium">{charName || 'Ta'}</span>
+                            {intent === 'join_and_add' && (
+                                <span className="ml-1.5 text-[9px] px-1.5 py-0.5 rounded-full align-middle"
+                                    style={{ background: 'rgba(195,178,255,0.3)', color: '#7a5db0', border: '1px solid rgba(195,178,255,0.5)' }}>
+                                    + 歌单
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* Cover */}
+                <div className="relative w-full h-28 overflow-hidden">
+                    {song.albumPic ? (
+                        <img
+                            src={song.albumPic}
+                            alt=""
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            onError={(e: any) => {
+                                const img = e.target;
+                                const container = img.parentElement;
+                                if (!container) return;
+                                img.style.display = 'none';
+                                if (container.querySelector('.music-cover-fallback')) return;
+                                const fallback = document.createElement('div');
+                                fallback.className = 'music-cover-fallback w-full h-full flex items-center justify-center';
+                                fallback.style.background = 'linear-gradient(135deg, #8b7ab8 0%, #6b95c7 100%)';
+                                fallback.innerHTML = `<div style="color:rgba(255,255,255,0.9);font-size:24px;">♪</div>`;
+                                container.appendChild(fallback);
+                            }}
+                        />
+                    ) : (
+                        <div className="w-full h-full flex items-center justify-center"
+                            style={{ background: 'linear-gradient(135deg, #8b7ab8 0%, #6b95c7 100%)' }}>
+                            <span style={{ color: 'rgba(255,255,255,0.9)', fontSize: '28px' }}>♪</span>
+                        </div>
+                    )}
+                    {/* 纯"收入歌单"保留角标；一起听意图已在头部表达，不再重复 */}
+                    {!isTogether && (
+                        <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-full backdrop-blur-sm text-[9px] font-medium"
+                            style={{ background: 'rgba(255,255,255,0.85)', color: '#5a49a8' }}>
+                            📌 收入歌单
+                        </div>
+                    )}
+                </div>
+                <div className="p-3">
+                    <div className="font-bold text-sm line-clamp-1 leading-snug"
+                        style={{ color: '#2a1f4d', fontFamily: `'Noto Serif','Georgia',serif` }}>
+                        {song.name || '未命名'}
+                    </div>
+                    <div className="text-[10px] mt-0.5 truncate" style={{ color: '#6b5b8f' }}>
+                        {song.artists || '—'}
+                    </div>
+                    {addedTo && (
+                        <div className="text-[9px] mt-1.5 italic" style={{ color: '#5a49a8' }}>
+                            已加入《{addedTo}》
+                        </div>
+                    )}
+                    <div className="mt-2 pt-1.5 flex items-center gap-1 text-[9px] border-t" style={{ color: '#a89bc5', borderColor: '#e0d9f0' }}>
+                        <span style={{ color: '#5a49a8', fontWeight: 600 }}>Shizuku Music</span>
+                        <span>·</span>
+                        <span>{isUser ? '分享' : '互动'}</span>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     // --- XHS Card Rendering (小红书笔记卡片) ---
     if (m.type === 'xhs_card' && m.metadata?.xhsNote) {
         const note = m.metadata.xhsNote;
@@ -871,14 +1016,22 @@ const MessageItem = React.memo(({
 
     if (m.type === 'emoji') {
         return commonLayout(
-            <img src={m.content} className="max-w-[160px] max-h-[160px] hover:scale-105 transition-transform drop-shadow-md active:scale-95" loading="lazy" decoding="async" />
+            m.content ? (
+                <img src={m.content} className="max-w-[160px] max-h-[160px] hover:scale-105 transition-transform drop-shadow-md active:scale-95" loading="lazy" decoding="async" />
+            ) : (
+                <div className="px-3 py-2 rounded-2xl bg-slate-100 text-slate-400 text-xs italic">[表情已丢失]</div>
+            )
         );
     }
 
     if (m.type === 'image') {
         return commonLayout(
             <div className="relative group">
-                <img src={m.content} className="max-w-[200px] max-h-[300px] rounded-2xl shadow-sm border border-black/5" alt="Uploaded" loading="lazy" decoding="async" />
+                {m.content ? (
+                    <img src={m.content} className="max-w-[200px] max-h-[300px] rounded-2xl shadow-sm border border-black/5" alt="Uploaded" loading="lazy" decoding="async" />
+                ) : (
+                    <div className="px-4 py-6 rounded-2xl bg-slate-100 text-slate-400 text-xs italic text-center min-w-[120px]">[图片已丢失]</div>
+                )}
             </div>
         );
     }

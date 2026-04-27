@@ -10,14 +10,15 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
-import { formatLifeSimResetCardForContext } from '../utils/lifeSimChatCard';
+import { formatMessageWithTime, formatMessageForPrompt } from '../utils/messageFormat';
 import { DEFAULT_ARCHIVE_PROMPTS } from '../components/chat/ChatConstants';
 import ImpressionPanel from '../components/character/ImpressionPanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
-import { safeResponseJson } from '../utils/safeApi';
+import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { normalizeUserImpression } from '../utils/impression';
+import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 
 const CharacterCard: React.FC<{
     char: CharacterProfile;
@@ -166,8 +167,25 @@ const Character: React.FC = () => {
             if (target) setFormData(target);
         }
     }
-  }, [editingId, view]); 
-  
+  }, [editingId, view]);
+
+  // EXTERNAL-UPDATE SYNC: pull in memories/refinedMemories written by other apps
+  // (e.g. Chat archive calling updateCharacter) so stale formData doesn't overwrite them.
+  useEffect(() => {
+    if (!editingId || !formData || formData.id !== editingId) return;
+    const latest = characters.find(c => c.id === editingId);
+    if (!latest) return;
+    const latestMemCount = latest.memories?.length ?? 0;
+    const localMemCount = formData.memories?.length ?? 0;
+    const latestRefKeys = Object.keys(latest.refinedMemories || {}).length;
+    const localRefKeys = Object.keys(formData.refinedMemories || {}).length;
+    if (latestMemCount > localMemCount || latestRefKeys > localRefKeys) {
+        setFormData(prev => prev && prev.id === editingId
+            ? { ...prev, memories: latest.memories, refinedMemories: latest.refinedMemories }
+            : prev);
+    }
+  }, [characters, editingId]);
+
   // Auto-save Effect with Safety Guard
   useEffect(() => {
     if (formData && editingId) {
@@ -297,19 +315,53 @@ const Character: React.FC = () => {
       if (userProfile.bio) identityContext += ` (${userProfile.bio})`;
       identityContext += '\n\n';
 
-      const prompt = identityContext + (formattedPrompt || `Task: Summarize the following logs (${year}-${month}) into a concise memory. Language: Same as logs (Chinese). ${rawText}`);
+      // Gemini 3.1 preview 对"人设堆 3000+ token → 迟到任务句"的 all-in-one user 消息
+      // 会静默拒答（completion_tokens=0，代理回 "Token count: N" stub 污染记忆库）。
+      // 两条对抗措施一起上：
+      //   (A) 任务声明放最前，明确这是总结不是角色扮演
+      //   (B) 拆 system+user：规则/身份/任务走 system，原始日记走 user，
+      //       让模型看清哪段是指令、哪段是数据
+      const taskPreamble = `### 任务（最优先，请先读此段再读后文）
+你正在执行"月度记忆精炼"：把 user 消息里提供的【${year}-${month} 每日记忆碎片】压缩成一份简洁的月度核心记忆。
+这是**总结写作任务**，不是角色扮演对话——不要进入聊天模式、不要等待对方发言、不要只输出空白或沉默，直接输出总结正文。`;
 
+      const systemContent = formattedPrompt
+          ? `${taskPreamble}\n\n### 角色视角（仅供写作口吻参考）\n${identityContext}### 详细规则与输出格式\n${formattedPrompt}`
+          : `${taskPreamble}\n\n### 角色视角（仅供写作口吻参考）\n${identityContext}### 详细规则\n以该角色的第一人称写作，使用与日记相同的语言（中文），输出一段精简的月度核心记忆。`;
+      const userContent = rawText;
+
+      const refineUrl = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+      const t0 = performance.now();
       try {
-          const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+          const response = await fetch(refineUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-              body: JSON.stringify({ model: apiConfig.model, messages: [{ role: "user", content: prompt }], temperature: 0.3 })
+              body: JSON.stringify({
+                  model: apiConfig.model,
+                  messages: [
+                      { role: 'system', content: systemContent },
+                      { role: 'user', content: userContent },
+                  ],
+                  temperature: 0.3,
+              })
           });
-          if (!response.ok) throw new Error('API Request failed');
+          const dt = Math.round(performance.now() - t0);
+          if (!response.ok) throw new Error(`API Request failed (HTTP ${response.status} after ${dt}ms)`);
           const data = await safeResponseJson(response);
-          const summary = data.choices[0].message.content.trim();
+          const summary = extractContent(data);
+          if (!summary) {
+              // 失败时留一条诊断 warn：Gemini 3.1 preview 在某些 prompt 下会静默拒答
+              // （completion_tokens=0，代理回 "Token count: N" stub），这些信息能帮
+              // 之后快速确认是不是同一个坑复发
+              const msg = data?.choices?.[0]?.message;
+              const rawContent = typeof msg?.content === 'string' ? msg.content : '';
+              const finishReason = data?.choices?.[0]?.finish_reason;
+              console.warn(`🧠 [Refine ${year}-${month}] 模型返回空: dt=${dt}ms finish=${finishReason} content.length=${rawContent.length} preview=${rawContent.slice(0, 120)} usage=`, data?.usage);
+              addToast(`精炼失败: 模型返回为空 (${dt}ms, finish=${finishReason || 'n/a'})，详情见控制台`, 'error');
+              return;
+          }
           const key = `${year}-${month}`;
-          
+
           // CHECK IF USER SWITCHED
           if (editingIdRef.current === targetId) {
               // Still on same page
@@ -326,7 +378,79 @@ const Character: React.FC = () => {
 
   const handleDeleteMemories = (ids: string[]) => { if (!formData) return; handleChange('memories', (formData.memories || []).filter(m => !ids.includes(m.id))); addToast(`已删除 ${ids.length} 条记忆`, 'success'); };
   const handleUpdateMemory = (id: string, newSummary: string) => { if (!formData) return; handleChange('memories', (formData.memories || []).map(m => m.id === id ? { ...m, summary: newSummary } : m)); addToast('记忆已更新', 'success'); };
-  
+
+  /**
+   * 按指定日期强制重新总结：读原始聊天记录（忽略 hideBeforeMessageId），LLM 总结，
+   * upsert 同日期的 'archive' MemoryFragment（'palace' 自动归档的不动，保持并存）。
+   * 这是自动化的兜底路径：即使 4.5 已经被 palace 处理+隐藏+向量化，用户依然能让 AI
+   * 重新阅读 4.5 原始聊天做一版手动总结。
+   */
+  /**
+   * @param overridePromptId 用户在 MemoryArchivist 的重总结弹窗里现场选的模板 id；
+   *                        没提供则退回到当前 selectedPromptId
+   */
+  const handleForceArchiveDate = async (dateStr: string, overridePromptId?: string): Promise<void> => {
+      if (!apiConfig.apiKey || !formData) { addToast('请先配置 API Key', 'error'); return; }
+      const targetId = formData.id;
+      try {
+          const allMsgs = await DB.getMessagesByCharId(targetId, true);
+          // 忽略 hideBeforeMessageId —— 这是强制重总结的关键
+          const dayMsgs = allMsgs.filter(m => {
+              const d = new Date(m.timestamp);
+              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+              return key === dateStr;
+          });
+          if (dayMsgs.length === 0) { addToast(`${dateStr} 当天无消息可总结`, 'info'); return; }
+
+          const timeFmt = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+          const rawLog = dayMsgs
+              .map(m => formatMessageWithTime(m, formData.name, userProfile.name, timeFmt))
+              .join('\n');
+
+          // 模板优先级：override（弹窗现场选）→ 当前 state → 默认 preset
+          const effectivePromptId = overridePromptId || selectedPromptId;
+          const templateObj = archivePrompts.find(p => p.id === effectivePromptId) || DEFAULT_ARCHIVE_PROMPTS[0];
+          const baseContext = ContextBuilder.buildCoreContext(formData, userProfile);
+          let prompt = baseContext + '\n\n' + templateObj.content;
+          prompt = prompt.replace(/\$\{dateStr\}/g, dateStr);
+          prompt = prompt.replace(/\$\{char\.name\}/g, formData.name);
+          prompt = prompt.replace(/\$\{userProfile\.name\}/g, userProfile.name);
+          prompt = prompt.replace(/\$\{rawLog.*?\}/g, rawLog.substring(0, 200000));
+
+          const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
+              body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.5, max_tokens: 8000, stream: false }),
+          });
+          if (!response.ok) throw new Error(`API ${response.status}`);
+          const data = await safeResponseJson(response);
+          let summary = (data.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '');
+          if (!summary) throw new Error('空响应');
+
+          // upsert：同日期的 mood='archive' 替换；'palace' 自动归档不碰
+          const existing = formData.memories || [];
+          const kept = existing.filter(m => !(m.date === dateStr && (m.mood === 'archive' || !m.mood)));
+          const newFrag: MemoryFragment = {
+              id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              date: dateStr,
+              summary,
+              mood: 'archive',
+          };
+
+          if (editingIdRef.current === targetId) {
+              handleChange('memories', [...kept, newFrag]);
+          } else {
+              // 用户切角色了 —— 直接写回目标角色
+              const currentMems = characters.find(c => c.id === targetId)?.memories || [];
+              const curKept = currentMems.filter(m => !(m.date === dateStr && (m.mood === 'archive' || !m.mood)));
+              updateCharacter(targetId, { memories: [...curKept, newFrag] });
+          }
+          addToast(`${dateStr} 已强制重新总结`, 'success');
+      } catch (e: any) {
+          addToast(`重总结失败: ${e.message || '未知错误'}`, 'error');
+      }
+  };
+
   // NEW: Core Memory Handlers
   const handleUpdateRefinedMemory = (year: string, month: string, newContent: string) => {
       if (!formData) return;
@@ -394,7 +518,7 @@ const Character: React.FC = () => {
         setBatchProgress('Initializing...');
         
         try {
-            const msgs = await DB.getMessagesByCharId(targetId);
+            const msgs = await DB.getMessagesByCharId(targetId, true);
             const validMsgs = msgs.filter(m => !formData.hideBeforeMessageId || m.id >= formData.hideBeforeMessageId);
             const msgsByDate: Record<string, any[]> = {};
             
@@ -415,6 +539,7 @@ const Character: React.FC = () => {
             const dates = Object.keys(msgsByDate).sort();
             const newMemories: MemoryFragment[] = [];
 
+            await injectMemoryPalace(formData);
             const baseContext = ContextBuilder.buildCoreContext(formData, userProfile);
 
             for (let i = 0; i < dates.length; i++) {
@@ -422,36 +547,10 @@ const Character: React.FC = () => {
                 setBatchProgress(`Processing ${date} (${i+1}/${dates.length})`);
                 
                 const dayMsgs = msgsByDate[date];
-                const rawLog = dayMsgs.map(m => {
-                    const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false});
-                    const sender = m.role === 'user' ? userProfile.name : (m.role === 'system' ? '[系统]' : formData.name);
-                    let content = m.content;
-                    if (m.type === 'image') content = '[图片/Image]';
-                    else if (m.type === 'emoji') content = `[表情包: ${m.content.split('/').pop() || 'sticker'}]`;
-                    else if ((m.type as string) === 'score_card') {
-                        try {
-                            const card = m.metadata?.scoreCard || JSON.parse(m.content);
-                            if (card?.type === 'lifesim_reset_card') {
-                                content = formatLifeSimResetCardForContext(card, formData.name);
-                            } else if (card?.type === 'guidebook_card') {
-                                const diff = (card.finalAffinity ?? 0) - (card.initialAffinity ?? 0);
-                                content = `[攻略本游戏结算] ${formData.name}和${userProfile.name}玩了一局"攻略本"恋爱小游戏（${card.rounds || '?'}回合）。结局：「${card.title || '???'}」 好感度变化：${card.initialAffinity} → ${card.finalAffinity}（${diff >= 0 ? '+' : ''}${diff}） ${formData.name}的评语：${card.charVerdict || '无'} ${formData.name}对${userProfile.name}的新发现：${card.charNewInsight || '无'}`;
-                            } else if (card?.type === 'whiteday_card') {
-                                const passedStr = card.passed ? `通过测验，解锁了DIY巧克力` : `未通过测验`;
-                                const questionsText = (card.questions as any[])?.map((q: any, i: number) =>
-                                    `第${i + 1}题"${q.question}"：${userProfile.name}选"${q.userAnswer}"（${q.isCorrect ? '✓' : '✗'}）${q.review ? `，${formData.name}评语：${q.review}` : ''}`
-                                ).join('；') || '';
-                                content = `[白色情人节默契测验] ${userProfile.name}完成了${formData.name}出的白色情人节测验，答对${card.score}/${card.total}题，${passedStr}。${questionsText}${card.finalDialogue ? `。${formData.name}最终评价：${card.finalDialogue}` : ''}`;
-                            } else {
-                                content = '[系统卡片]';
-                            }
-                        } catch { content = '[系统卡片]'; }
-                    }
-                    else if (m.type === 'interaction') content = `[系统: ${userProfile.name}戳了${formData.name}一下]`;
-                    else if (m.type === 'transfer') content = `[系统: ${userProfile.name}转账 ${m.metadata?.amount}]`;
-
-                    return `[${time}] ${sender}: ${content}`;
-                }).join('\n');
+                const timeFmt = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+                const rawLog = dayMsgs
+                    .map(m => formatMessageWithTime(m, formData.name, userProfile.name, timeFmt))
+                    .join('\n');
 
                 // Use selected template (same as ChatApp) with variable substitution
                 const templateObj = archivePrompts.find(p => p.id === selectedPromptId) || DEFAULT_ARCHIVE_PROMPTS[0];
@@ -474,9 +573,9 @@ const Character: React.FC = () => {
 
                 if (response.ok) {
                     const data = await safeResponseJson(response);
-                    let summary = data.choices?.[0]?.message?.content || '';
-                    summary = summary.replace(/^["']|["']$/g, '').trim(); 
-                    
+                    let summary = extractContent(data);
+                    summary = summary.replace(/^["']|["']$/g, '').trim();
+
                     if (summary) {
                         newMemories.push({
                             id: `mem-${Date.now()}-${Math.random()}`,
@@ -489,33 +588,40 @@ const Character: React.FC = () => {
                 await new Promise(r => setTimeout(r, 500));
             }
 
+            const totalDays = dates.length;
+            const okCount = newMemories.length;
+            const toastLevel: 'success' | 'info' | 'error' =
+                okCount === 0 ? 'error' : okCount < totalDays ? 'info' : 'success';
+            const toastMsg = okCount === 0
+                ? `批量总结失败：${totalDays} 天均未生成记忆（请检查 API/模型）`
+                : okCount < totalDays
+                    ? `批量总结完成：${okCount}/${totalDays} 天成功（部分失败）`
+                    : `批量总结完成：已生成 ${okCount} 条记忆`;
+
             if (editingIdRef.current === targetId) {
-                handleChange('memories', [...(formData.memories || []), ...newMemories]);
+                if (okCount > 0) handleChange('memories', [...(formData.memories || []), ...newMemories]);
                 setBatchProgress('Done!');
                 setTimeout(() => {
                     setIsBatchProcessing(false);
                     setShowBatchModal(false);
-                    addToast(`Processed ${newMemories.length} days`, 'success');
+                    addToast(toastMsg, toastLevel);
                 }, 1000);
             } else {
                 // Background update
-                const currentMems = characters.find(c => c.id === targetId)?.memories || [];
-                updateCharacter(targetId, { memories: [...currentMems, ...newMemories] });
-                
-                // Cleanup UI state since we are elsewhere
+                if (okCount > 0) {
+                    const currentMems = characters.find(c => c.id === targetId)?.memories || [];
+                    updateCharacter(targetId, { memories: [...currentMems, ...newMemories] });
+                }
                 setIsBatchProcessing(false);
-                setShowBatchModal(false); // Modal is on current view, but we are likely on another view. 
-                // Since this component is unmounted when view changes, this code block might not even run if unmounted.
-                // However, if we switched from Detail to List view, Character.tsx might still be mounted but hidden? 
-                // Actually Character.tsx unmounts detail view content if view changes.
-                // If view changed, this function probably aborted or memory leaked.
-                // Assuming component is still mounted (e.g. switched to Memory tab of another character in same app instance - wait, Character app only shows one at a time).
-                addToast(`后台任务完成：为 ${formData.name} 生成了 ${newMemories.length} 条记忆`, 'success');
+                setShowBatchModal(false);
+                addToast(`${formData.name}：${toastMsg}`, toastLevel);
             }
 
         } catch (e: any) {
             setBatchProgress(`Error: ${e.message}`);
             setIsBatchProcessing(false);
+            setShowBatchModal(false);
+            addToast(`批量总结失败: ${e.message}`, 'error');
         }
     };
 
@@ -532,6 +638,7 @@ const Character: React.FC = () => {
           const boundUser = userProfile;
 
           // 构建完整角色上下文（包含人设、世界观、用户档案、精炼记忆等宏观信息）
+          await injectMemoryPalace(formData);
           const fullContext = ContextBuilder.buildCoreContext(formData, userProfile);
 
           let messagesToAnalyze = "";
@@ -544,29 +651,9 @@ const Character: React.FC = () => {
           // 与聊天时角色能看到的记忆完全一致，不再额外抓取。
           // 重置模式下大幅减少近期聊天的数量，避免近因偏差
           const recentMsgs = await DB.getRecentMessagesByCharId(targetId, type === 'initial' ? 15 : 50);
-          const msgText = recentMsgs.map(m => {
-              let content = m.content;
-              if (m.type === 'image') content = '[图片]';
-              else if (m.type === 'emoji') content = '[表情包]';
-              else if (m.type === 'interaction') content = `[戳了一下]`;
-              else if (m.type === 'transfer') content = `[转账 ${m.metadata?.amount ?? ''}]`;
-              else if ((m.type as string) === 'score_card') {
-                  try {
-                      const card = m.metadata?.scoreCard || JSON.parse(m.content);
-                      if (card?.type === 'lifesim_reset_card') {
-                          content = formatLifeSimResetCardForContext(card, charName);
-                      } else if (card?.type === 'guidebook_card') {
-                          const diff = (card.finalAffinity ?? 0) - (card.initialAffinity ?? 0);
-                          content = `[攻略本结算] 结局「${card.title || '???'}」好感${diff >= 0 ? '+' : ''}${diff}`;
-                      } else if (card?.type === 'whiteday_card') {
-                          content = `[白色情人节测验] 答对${card.score}/${card.total}题${card.passed ? '，解锁DIY巧克力' : ''}`;
-                      } else {
-                          content = '[系统卡片]';
-                      }
-                  } catch { content = '[系统卡片]'; }
-              }
-              return `${m.role === 'user' ? boundUser.name : charName}: ${content}`;
-          }).join('\n');
+          const msgText = recentMsgs
+              .map(m => formatMessageForPrompt(m, charName, boundUser.name))
+              .join('\n');
 
           if (msgText) messagesToAnalyze += `\n【最近的聊天记录 (Recent Chats - 仅用于检测近期变化)】:\n${msgText}\n`;
 
@@ -1050,6 +1137,9 @@ ${isInitialGeneration ? `
                                onToggleActiveMonth={handleToggleActiveMonth}
                                onUpdateRefinedMemory={handleUpdateRefinedMemory}
                                onDeleteRefinedMemory={handleDeleteRefinedMemory}
+                               onForceArchiveDate={handleForceArchiveDate}
+                               forceArchiveTemplates={archivePrompts}
+                               forceArchiveDefaultPromptId={selectedPromptId}
                            />
                        </div>
                    )}
